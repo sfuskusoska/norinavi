@@ -265,9 +265,72 @@ function calcFare(legs, passId) {
   return { ticket, ic, passApplied };
 }
 
-function delayMap() {
+/* ================= リアルタイム遅延フィード(公式運行情報) ================= */
+const AUTO_DELAY_MIN = 10; // 遅延報告のある路線は+10分と仮定して反映
+
+let autoDelayData = { updated: 0, delays: [] };
+let autoDelayFetchedAt = 0;
+
+async function loadAutoDelays(force) {
+  if (!force && Date.now() - autoDelayFetchedAt < 5 * 60 * 1000) return;
+  try {
+    const res = await fetch('live/delays.json', { cache: 'no-store' });
+    if (!res.ok) return;
+    autoDelayData = await res.json();
+    autoDelayFetchedAt = Date.now();
+    renderDelays();
+  } catch { /* オフライン時などは無視 */ }
+}
+
+/* フィードの社名と収録路線の対応(誤マッチ防止) */
+const COMPANY_HINTS = [
+  ['JR', ['JR']],
+  ['阪急', ['阪急']],
+  ['阪神', ['阪神']],
+  ['京阪', ['京阪']],
+  ['近鉄', ['近鉄', '近畿日本']],
+  ['南海', ['南海']],
+  ['小田急', ['小田急']],
+  ['東急', ['東急']],
+  ['Osaka Metro', ['大阪市高速', 'Osaka Metro', '大阪メトロ']]
+];
+
+function companyMatches(line, company) {
+  for (const [token, keys] of COMPANY_HINTS) {
+    if (line.name.includes(token)) return keys.some(k => (company || '').includes(k));
+  }
+  return true;
+}
+
+function matchFeedLine(feed) {
+  const fn = (feed.name || '').replace(/\s/g, '');
+  if (!fn) return [];
+  return LINES.filter(line => {
+    if (!companyMatches(line, feed.company)) return false;
+    return line.name.includes(fn) || fn.includes(line.short) || line.short.includes(fn);
+  });
+}
+
+function autoDelayEntries() {
   const m = {};
-  for (const d of store.delays) m[d.lineId] = d;
+  for (const f of (autoDelayData.delays || [])) {
+    for (const line of matchFeedLine(f)) {
+      if (!m[line.id]) {
+        m[line.id] = {
+          lineId: line.id, min: AUTO_DELAY_MIN, auto: true,
+          reason: '遅延(公式運行情報)',
+          comment: `${f.company} ${f.name}で遅延が報告されています`,
+          ts: f.since ? f.since * 1000 : Date.now()
+        };
+      }
+    }
+  }
+  return m;
+}
+
+function delayMap() {
+  const m = autoDelayEntries();              // 公式フィード由来
+  for (const d of store.delays) m[d.lineId] = d; // 手動登録が優先
   return m;
 }
 
@@ -290,20 +353,29 @@ function buildRoute(legs, sig, dmap, passId, passPriority) {
     rideMin, delayTotal,
     fare: calcFare(legs, passId),
     congestion: h % 3,
-    firstWait: 2 + h % 9,
     passPriority: !!passPriority,
     passName: pass.id !== 'none' && pass.covers.length ? pass.name : null
   };
 }
 
+/* 時間帯別の運転間隔(分)。ラッシュは本数多め、深夜早朝は少なめの擬似ダイヤ */
+function headwayFor(lineId, minOfDay) {
+  const line = lineById(lineId);
+  const h = (((minOfDay % 1440) + 1440) % 1440) / 60;
+  const base = (line.operator === 'OSAKAMETRO' || line.id === 'yamanote' || line.id === 'o_loop') ? 4
+    : line.operator === 'JR' ? 6 : 6;
+  if ((h >= 7 && h < 9.5) || (h >= 17 && h < 19.5)) return Math.max(3, Math.round(base * 0.7)); // ラッシュ
+  if (h >= 22 || h < 6) return base + 7; // 深夜・早朝
+  return base + 2; // 日中
+}
+
 function computeTimes(r, dep) {
   let cur = dep;
-  let boarded = false;
   const h = hashStr(r.sig);
   r.legs.forEach((leg, i) => {
     if (leg.lineId !== 'WALK') {
-      cur += boarded ? 3 + (h + i) % 4 : r.firstWait; // 乗車待ち(徒歩は待ちなし)
-      boarded = true;
+      const hw = headwayFor(leg.lineId, cur);
+      cur += 1 + (h + i * 7) % hw; // 次の便までの待ち(運転間隔モデル・徒歩は待ちなし)
     }
     leg.depTime = cur;
     leg.arrTime = cur + leg.min + leg.delay;
@@ -589,6 +661,7 @@ async function doSearch() {
     try { await locate(); }
     catch { toast('位置情報を取得できませんでした。ブラウザの許可設定を確認してください'); return; }
   }
+  await loadAutoDelays(); // 公式運行情報を更新(5分キャッシュ)
   const points = collectPoints();
   if (!points) return;
   const baseMin = baseMinutes();
@@ -633,6 +706,10 @@ function renderResults() {
   if (mode === 'train' && activeDelays.length) {
     banners.push(`<div class="banner warn">${warnSvg()}<span>ユーザー登録の遅延情報 ${activeDelays.length}件を所要時間に反映しています</span></div>`);
   }
+  const autoCount = Object.keys(autoDelayEntries()).length;
+  if (mode === 'train' && autoCount) {
+    banners.push(`<div class="banner warn">${warnSvg()}<span>公式運行情報: 収録${autoCount}路線で遅延報告あり(+${AUTO_DELAY_MIN}分想定で反映)</span></div>`);
+  }
   if (mode === 'train' && !banners.length) {
     banners.push(`<div class="banner info">${infoSvg()}<span>運賃は通常運賃を表示しています(きっぷ/IC)</span></div>`);
   }
@@ -651,19 +728,26 @@ function renderResults() {
       const line = lineById(l.lineId);
       return `<span class="route-line-chip"><i style="background:${line.color}"></i>${esc(line.short)}</span>`;
     }).join('<span style="color:#b9c6ba;font-weight:800">›</span>');
+    const cardDep = r.legs[0].depTime;
+    const firstRide = r.legs.find(l => l.lineId !== 'WALK');
+    const nextDep = firstRide && r.legs[0].lineId !== 'WALK'
+      ? (() => { const hw = headwayFor(firstRide.lineId, firstRide.depTime);
+          return `<span>次発 ${fmtTime(cardDep + hw)} / ${fmtTime(cardDep + hw * 2)}</span>`; })()
+      : '';
     return `
     <div class="route-card" data-idx="${idx}">
       <div class="route-tags">${tags.join('')}</div>
       <div class="route-time-row">
-        <span class="route-time">${fmtTime(r.dep)}</span>
+        <span class="route-time">${fmtTime(cardDep)}</span>
         <span class="route-arrow">→</span>
         <span class="route-time arr">${fmtTime(r.arr)}</span>
       </div>
       <div class="route-meta">
-        <span>所要 ${fmtDur(r.total)}</span>
+        <span>所要 ${fmtDur(r.arr - cardDep)}</span>
         <span>乗換 ${r.transfers}回</span>
         <span class="congestion c${r.congestion}">${congestionLabel[r.congestion]}</span>
         <span class="route-fare">${r.fare.ticket === 0 ? '¥0(パス適用)' : 'IC ' + yen(r.fare.ic)}</span>
+        ${nextDep}
       </div>
       <div class="route-lines">${chips}</div>
       <span class="chev">›</span>
@@ -722,11 +806,12 @@ function renderDetail() {
   const { points } = state.lastSearch;
   const vias = new Set(points.slice(1, -1));
 
+  const headDep = r.legs[0].depTime;
   $('#detail-head').innerHTML = `
     <div class="detail-sum-card">
-      <div class="detail-sum-time">${fmtTime(r.dep)} → ${fmtTime(r.arr)}</div>
+      <div class="detail-sum-time">${fmtTime(headDep)} → ${fmtTime(r.arr)}</div>
       <div class="detail-sum-meta">
-        <span>所要 <b>${fmtDur(r.total)}</b></span>
+        <span>所要 <b>${fmtDur(r.arr - headDep)}</b></span>
         <span>乗換 <b>${r.transfers}</b>回</span>
         <span>${r.fare.ticket === 0 ? 'フリーパス適用 ¥0' : 'IC <b>' + yen(r.fare.ic) + '</b>'}</span>
       </div>
@@ -760,7 +845,7 @@ function renderDetail() {
       <div class="leg-delay">${warnSvg()}
         <span>${esc(leg.delayInfo.reason)}の影響により約${leg.delay}分の遅延
         ${leg.delayInfo.comment ? '<br>「' + esc(leg.delayInfo.comment) + '」' : ''}
-        <br><small>ユーザー登録 ${new Date(leg.delayInfo.ts).getMonth() + 1}/${new Date(leg.delayInfo.ts).getDate()} ${fmtTime(new Date(leg.delayInfo.ts).getHours() * 60 + new Date(leg.delayInfo.ts).getMinutes())}</small></span>
+        <br><small>${leg.delayInfo.auto ? '公式運行情報' : 'ユーザー登録'} ${new Date(leg.delayInfo.ts).getMonth() + 1}/${new Date(leg.delayInfo.ts).getDate()} ${fmtTime(new Date(leg.delayInfo.ts).getHours() * 60 + new Date(leg.delayInfo.ts).getMinutes())}</small></span>
       </div>` : '';
     rows.push(`
       <div class="tl-leg">
@@ -878,11 +963,35 @@ function showPathOnMap(p) {
 /* ================= 遅延情報 ================= */
 function renderDelays() {
   const delays = store.delays;
+  const auto = Object.values(autoDelayEntries());
   const list = $('#delay-list');
+
+  // 公式運行情報(自動取得)セクション
+  const updated = autoDelayData.updated ? new Date(autoDelayData.updated * 1000) : null;
+  const feedTotal = (autoDelayData.delays || []).length;
+  let html = `
+    <div class="card delay-form-card">
+      <h2 class="card-title">公式運行情報(自動取得)</h2>
+      <p class="card-sub">「鉄道遅延情報のjson」(Yahoo!運行情報ベース)から約30分ごとに自動更新。収録路線に一致した遅延は検索結果に+${AUTO_DELAY_MIN}分想定で反映されます。${updated ? `最終更新: ${updated.getMonth() + 1}/${updated.getDate()} ${fmtTime(updated.getHours() * 60 + updated.getMinutes())}` : ''}</p>
+      ${auto.length ? auto.map(d => {
+        const line = lineById(d.lineId);
+        return `
+      <div class="delay-item">
+        <div class="delay-item-body">
+          <div class="delay-item-line"><i style="background:${line.color}"></i>${esc(line.name)}</div>
+          <div class="delay-item-status">遅延が報告されています(+${AUTO_DELAY_MIN}分想定)</div>
+          <div class="delay-item-sub">${esc(d.comment)}</div>
+        </div>
+      </div>`;
+      }).join('') : '<p class="card-sub" style="margin:0">現在、収録路線で報告されている遅延はありません。</p>'}
+      ${feedTotal ? `<p class="card-sub" style="margin:8px 0 0">全国では ${feedTotal} 路線で遅延が報告されています</p>` : ''}
+    </div>`;
+
+  // 手動登録セクション
   if (!delays.length) {
-    list.innerHTML = '<div class="empty-note">登録されている遅延情報はありません。<br>上のフォームから登録すると、経路検索に反映されます。</div>';
+    html += '<div class="empty-note">手動登録された遅延情報はありません。<br>上のフォームから登録すると、経路検索に反映されます。</div>';
   } else {
-    list.innerHTML = delays.slice().sort((a, b) => b.ts - a.ts).map(d => {
+    html += delays.slice().sort((a, b) => b.ts - a.ts).map(d => {
       const line = lineById(d.lineId);
       const dt = new Date(d.ts);
       return `
@@ -895,21 +1004,24 @@ function renderDelays() {
         <button class="delay-del" data-id="${d.id}">削除</button>
       </div>`;
     }).join('');
-    $$('#delay-list .delay-del').forEach(b => b.addEventListener('click', () => {
-      store.delays = store.delays.filter(x => String(x.id) !== b.dataset.id);
-      renderDelays();
-      toast('遅延情報を削除しました');
-    }));
   }
+  list.innerHTML = html;
+  $$('#delay-list .delay-del').forEach(b => b.addEventListener('click', () => {
+    store.delays = store.delays.filter(x => String(x.id) !== b.dataset.id);
+    renderDelays();
+    toast('遅延情報を削除しました');
+  }));
+
+  const total = delays.length + auto.length;
   const badge = $('#delay-tab-badge');
-  badge.classList.toggle('hidden', !delays.length);
-  badge.textContent = delays.length;
+  badge.classList.toggle('hidden', !total);
+  badge.textContent = total;
 
   const home = $('#delay-notice-home');
-  home.innerHTML = delays.length
-    ? `<div class="banner warn" style="cursor:pointer" id="home-delay-banner">${warnSvg()}<span>遅延情報 ${delays.length}件が登録されています(検索結果に反映されます)</span></div>`
+  home.innerHTML = total
+    ? `<div class="banner warn" style="cursor:pointer" id="home-delay-banner">${warnSvg()}<span>遅延情報 ${total}件(手動${delays.length}・公式${auto.length})が検索結果に反映されます</span></div>`
     : '';
-  if (delays.length) $('#home-delay-banner').addEventListener('click', () => switchTab('delay'));
+  if (total) $('#home-delay-banner').addEventListener('click', () => switchTab('delay'));
 }
 
 function addDelay() {
@@ -1050,6 +1162,7 @@ function init() {
   renderDelays();
   renderPassUI();
   updateHeader();
+  loadAutoDelays(true);
 
   // デモ用の初期値
   $('#input-origin').value = '梅田';

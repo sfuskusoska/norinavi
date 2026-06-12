@@ -1,0 +1,37 @@
+name: 遅延情報の自動更新
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-delays
+  cancel-in-progress: true
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 遅延フィードを取得して変換
+        run: |
+          curl -fsS --max-time 30 -A "norinavi-demo (https://github.com/sfuskusoska/norinavi)" \
+            https://tetsudo.rti-giken.jp/free/delay.json -o /tmp/delay.json
+          python3 scripts/build_delays.py /tmp/delay.json live/delays.json
+
+      - name: 変更があればコミット
+        run: |
+          git config user.name "delay-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add live/delays.json
+          if git diff --cached --quiet; then
+            echo "変更なし"
+          else
+            git commit -m "chore: 遅延情報を自動更新"
+            git push
+          fi
