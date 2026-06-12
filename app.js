@@ -972,7 +972,7 @@ function renderDelays() {
   let html = `
     <div class="card delay-form-card">
       <h2 class="card-title">公式運行情報(自動取得)</h2>
-      <p class="card-sub">「鉄道遅延情報のjson」(Yahoo!運行情報ベース)から約30分ごとに自動更新。収録路線に一致した遅延は検索結果に+${AUTO_DELAY_MIN}分想定で反映されます。${updated ? `最終更新: ${updated.getMonth() + 1}/${updated.getDate()} ${fmtTime(updated.getHours() * 60 + updated.getMinutes())}` : ''}</p>
+      <p class="card-sub">外部の運行情報フィードと連携すると、収録路線に一致した遅延が検索結果に+${AUTO_DELAY_MIN}分想定で自動反映されます。${updated ? `最終更新: ${updated.getMonth() + 1}/${updated.getDate()} ${fmtTime(updated.getHours() * 60 + updated.getMinutes())}` : '現在は連携待機中です(定番だった無料フィードが2022年に終了したため)。下のフォームから手動で登録できます。'}</p>
       ${auto.length ? auto.map(d => {
         const line = lineById(d.lineId);
         return `
