@@ -56,6 +56,31 @@ const state = {
   pathResult: null        // 自転車/徒歩の結果
 };
 
+/* 路線の所要時間・営業キロを座標から補完(times/km が無い路線のみ自動算出) */
+function normalizeLines() {
+  for (const line of LINES) {
+    const n = line.stations.length;
+    const hops = line.loop ? n : n - 1;
+    if (!line.km || line.km.length !== hops) {
+      line.km = [];
+      for (let i = 0; i < hops; i++) {
+        const a = STATIONS[line.stations[i]], b = STATIONS[line.stations[(i + 1) % n]];
+        line.km.push(+(haversine(a, b) * 1.18).toFixed(1)); // 直線距離×1.18で線路長を概算
+      }
+    }
+    if (!line.times || line.times.length !== hops) {
+      const sp = line.speed || 35;
+      line.times = line.km.map(k => Math.max(2, Math.round(k / sp * 60)));
+    }
+  }
+}
+normalizeLines();
+
+/* 駅名エイリアス(別名)を収録駅名に解決 */
+function resolveAlias(name) {
+  return (typeof ALIASES !== 'undefined' && ALIASES[name]) || name;
+}
+
 /* 駅 → 乗り入れ路線 */
 const STATION_LINES = {};
 for (const line of LINES) for (const st of line.stations) (STATION_LINES[st] = STATION_LINES[st] || []).push(line);
@@ -385,15 +410,24 @@ function addViaRow(value = '') {
 }
 
 /* ================= 駅名サジェスト ================= */
-const POPULAR = ['新宿', '東京', '渋谷', '横浜', '町田', '八王子', '吉祥寺', '品川'];
+const POPULAR = ['梅田', 'なんば', '三宮', '天王寺', '京都', '新宿', '横浜', '東京'];
 let activeInput = null;
 
 function showSuggest(input) {
   activeInput = input;
   const q = input.value.trim();
-  let names = q
-    ? Object.keys(STATIONS).filter(n => n.includes(q))
-    : POPULAR;
+  let names;
+  if (q) {
+    names = Object.keys(STATIONS).filter(n => n.includes(q));
+    // 別名(大阪→梅田 など)でalso一致させる
+    if (typeof ALIASES !== 'undefined') {
+      for (const a in ALIASES) {
+        if (a.includes(q) && !names.includes(ALIASES[a])) names.push(ALIASES[a]);
+      }
+    }
+  } else {
+    names = POPULAR;
+  }
   names = names.slice(0, 8);
   const box = $('#suggest-box');
   if (!names.length) { hideSuggest(); return; }
@@ -416,14 +450,15 @@ function hideSuggest() {
 
 /* ================= 検索実行 ================= */
 function collectPoints() {
-  const names = [
+  const raw = [
     $('#input-origin').value.trim(),
     ...$$('.via-input').map(i => i.value.trim()).filter(Boolean),
     $('#input-dest').value.trim()
   ];
-  if (!names[0] || !names[names.length - 1]) { toast('出発地と目的地を入力してください'); return null; }
-  for (const n of names) {
-    if (!STATIONS[n]) { toast(`「${n}」はサンプルデータにありません。候補から選択してください`); return null; }
+  if (!raw[0] || !raw[raw.length - 1]) { toast('出発地と目的地を入力してください'); return null; }
+  const names = raw.map(resolveAlias); // 別名(大阪→梅田 など)を収録駅名に解決
+  for (let i = 0; i < names.length; i++) {
+    if (!STATIONS[names[i]]) { toast(`「${raw[i]}」はサンプルデータにありません。候補から選択してください`); return null; }
   }
   const points = names.filter((n, i) => i === 0 || n !== names[i - 1]); // 連続重複を除去
   if (points.length < 2) { toast('出発地と目的地が同じです'); return null; }
@@ -638,7 +673,7 @@ let map = null, routeGroup = null;
 
 function ensureMap() {
   if (map) return;
-  map = L.map('map', { zoomControl: false }).setView([35.62, 139.55], 10);
+  map = L.map('map', { zoomControl: false }).setView([34.70, 135.50], 11);
   L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxZoom: 19
@@ -881,8 +916,8 @@ function init() {
   updateHeader();
 
   // デモ用の初期値
-  $('#input-origin').value = '新宿';
-  $('#input-dest').value = '町田';
+  $('#input-origin').value = '梅田';
+  $('#input-dest').value = '三宮';
 
   // PWA
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
