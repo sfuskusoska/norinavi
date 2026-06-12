@@ -61,6 +61,10 @@
               <svg viewBox="0 0 24 24" width="15" height="15"><path d="M7 4v13m0 0l-3-3m3 3l3-3M17 20V7m0 0l-3 3m3-3l3 3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
               入替
             </button>
+            <button id="btn-near" class="tool-btn">
+              <svg viewBox="0 0 24 24" width="15" height="15"><circle cx="12" cy="12" r="3" fill="currentColor"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="7.5" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+              最寄駅情報
+            </button>
           </div>
           <div id="suggest-box" class="hidden"></div>
         </div>
@@ -235,6 +239,17 @@
         <button id="pass-done">完了</button>
       </div>
       <div id="pass-list"></div>
+    </div>
+  </div>
+
+  <!-- 最寄駅情報モーダル -->
+  <div id="near-modal" class="modal hidden">
+    <div class="modal-sheet">
+      <div class="modal-head">
+        <span>最寄駅情報</span>
+        <button id="near-done">閉じる</button>
+      </div>
+      <div id="near-body"></div>
     </div>
   </div>
 

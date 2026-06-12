@@ -45,8 +45,21 @@ const store = {
   get delays() { try { return JSON.parse(localStorage.getItem('nn_delays') || '[]'); } catch { return []; } },
   set delays(v) { localStorage.setItem('nn_delays', JSON.stringify(v)); },
   get pass() { return localStorage.getItem('nn_pass') || 'none'; },
-  set pass(v) { localStorage.setItem('nn_pass', v); }
+  set pass(v) { localStorage.setItem('nn_pass', v); },
+  get history() { try { return JSON.parse(localStorage.getItem('nn_history') || '[]'); } catch { return []; } },
+  set history(v) { localStorage.setItem('nn_history', JSON.stringify(v)); }
 };
+
+const MAX_HISTORY = 8;
+// 検索した地点名を履歴の先頭に積む(駅名・住所・現在地)
+function recordHistory(points) {
+  let h = store.history;
+  for (const p of points) {
+    if (p === '現在地') continue;
+    h = [p, ...h.filter(x => x !== p)];
+  }
+  store.history = h.slice(0, MAX_HISTORY);
+}
 
 const state = {
   mode: 'train',          // train | bike | walk
@@ -86,6 +99,11 @@ function resolveAlias(name) {
 const STATION_LINES = {};
 for (const line of LINES) for (const st of line.stations) (STATION_LINES[st] = STATION_LINES[st] || []).push(line);
 
+/* 仮想地点(現在地・住所検索でヒットした地点)。駅ではないが経路の端点になれる */
+const VIRTUAL = {};
+function setVirtual(name, pt) { VIRTUAL[name] = pt; STATIONS[name] = pt; }
+function isVirtual(name) { return Object.prototype.hasOwnProperty.call(VIRTUAL, name); }
+
 /* 近接駅の徒歩連絡(同一路線で隣接しない0.6km以内の駅同士)を事前計算
    例: 大阪天満宮↔南森町、北新地↔梅田、心斎橋↔四ツ橋、京都河原町↔祇園四条 */
 const WALK_PAIRS = (() => {
@@ -115,7 +133,7 @@ const WALK_PAIRS = (() => {
 
 function nearestStations(pt, count, maxKm) {
   const sorted = Object.keys(STATIONS)
-    .filter(n => n !== '現在地')
+    .filter(n => !isVirtual(n))
     .map(n => ({ name: n, km: haversine(pt, STATIONS[n]) }))
     .sort((x, y) => x.km - y.km);
   return sorted.filter((s, i) => i < count && (i === 0 || s.km <= maxKm));
@@ -168,13 +186,13 @@ function buildAdj(excludeSet) {
     (adj[p.a] = adj[p.a] || []).push({ to: p.b, line: 'WALK', min: p.min, km: p.km });
     (adj[p.b] = adj[p.b] || []).push({ to: p.a, line: 'WALK', min: p.min, km: p.km });
   }
-  // 現在地 → 近隣駅への徒歩接続(GPS取得後のみ)
-  if (STATIONS['現在地']) {
-    for (const s of nearestStations(STATIONS['現在地'], 4, 4)) {
+  // 仮想地点(現在地・住所)→ 近隣駅への徒歩接続
+  for (const vname in VIRTUAL) {
+    for (const s of nearestStations(VIRTUAL[vname], 4, 4)) {
       const km = +(s.km * 1.25).toFixed(2);
       const min = Math.max(1, Math.round(km / 4.8 * 60) + 1);
-      (adj['現在地'] = adj['現在地'] || []).push({ to: s.name, line: 'WALK', min, km });
-      (adj[s.name] = adj[s.name] || []).push({ to: '現在地', line: 'WALK', min, km });
+      (adj[vname] = adj[vname] || []).push({ to: s.name, line: 'WALK', min, km });
+      (adj[s.name] = adj[s.name] || []).push({ to: vname, line: 'WALK', min, km });
     }
   }
   return adj;
@@ -520,8 +538,8 @@ function searchPathRoute(points, mode, baseMin, timeType) {
 
 /* ================= Googleマップ連携 ================= */
 function gmapsUrl(points, mode) {
-  const enc = n => (n === '現在地' && STATIONS['現在地'])
-    ? `${STATIONS['現在地'].lat.toFixed(6)},${STATIONS['現在地'].lng.toFixed(6)}`
+  const enc = n => (isVirtual(n) && STATIONS[n])
+    ? `${STATIONS[n].lat.toFixed(6)},${STATIONS[n].lng.toFixed(6)}`
     : encodeURIComponent(n + '駅');
   if (mode === 'train') {
     // transitモードは経由地パラメータ非対応のため、経由地ありはマルチストップ形式で開く
@@ -605,33 +623,62 @@ let activeInput = null;
 function showSuggest(input) {
   activeInput = input;
   const q = input.value.trim();
-  let names;
-  if (q) {
-    names = Object.keys(STATIONS).filter(n => n !== '現在地' && n.includes(q));
-    // 別名(大阪→梅田 など)でも一致させる
-    if (typeof ALIASES !== 'undefined') {
-      for (const a in ALIASES) {
-        if (a.includes(q) && !names.includes(ALIASES[a])) names.push(ALIASES[a]);
-      }
+
+  // 事業者キーワード(路線名に含まれない呼び方)→ 事業者ID
+  const OP_KEYWORDS = { '地下鉄': 'OSAKAMETRO', 'メトロ': 'OSAKAMETRO', '市営': 'OSAKAMETRO' };
+
+  // 駅候補を収集(駅名・別名・路線名/略称・事業者名で一致)
+  function matchStations(query) {
+    const set = new Set();
+    for (const n of Object.keys(STATIONS)) if (!isVirtual(n) && n.includes(query)) set.add(n);
+    if (typeof ALIASES !== 'undefined') for (const a in ALIASES) if (a.includes(query)) set.add(ALIASES[a]);
+    // 路線名・略称での一致 → その路線の全駅
+    for (const line of LINES) {
+      if (line.name.includes(query) || line.short.includes(query)) line.stations.forEach(s => set.add(s));
     }
-  } else {
-    names = POPULAR.slice();
+    // 事業者キーワードでの一致 → その事業者の全駅
+    for (const kw in OP_KEYWORDS) {
+      if (query.includes(kw)) for (const line of LINES) if (line.operator === OP_KEYWORDS[kw]) line.stations.forEach(s => set.add(s));
+    }
+    return [...set];
   }
-  names = names.slice(0, 8);
-  if (!q || '現在地'.includes(q)) names.unshift('現在地');
+
+  const items = []; // { name, kind } kind: history | current | station
+  const used = new Set();
+  const push = (name, kind) => { if (!used.has(name)) { used.add(name); items.push({ name, kind }); } };
+
+  // 1) 検索履歴(上位に残す)
+  for (const h of store.history) {
+    if (!q || h.includes(q)) push(h, 'history');
+  }
+  // 2) 現在地
+  if (!q || '現在地'.includes(q)) push('現在地', 'current');
+  // 3) 駅・路線・事業者一致(クエリ無しは主要駅)
+  for (const n of (q ? matchStations(q) : POPULAR)) push(n, 'station');
+
+  const list = items.slice(0, 12);
   const box = $('#suggest-box');
-  if (!names.length) { hideSuggest(); return; }
-  box.innerHTML = names.map(n => n === '現在地' ? `
+  if (!list.length) { hideSuggest(); return; }
+
+  const stationItem = (n, kind) => {
+    const lines = (STATION_LINES[n] || []);
+    const lineNames = lines.map(l => l.short).join('・');
+    const tag = kind === 'history'
+      ? '<span class="sg-tag hist">履歴</span>'
+      : `<span class="st-lines">${lines.map(l => `<i class="line-dot" style="background:${l.color}"></i>`).join('')}</span>`;
+    const pin = kind === 'history'
+      ? '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 7v5l3 2M21 12a9 9 0 11-18 0 9 9 0 0118 0z" fill="none" stroke="#e8780a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 2a7 7 0 00-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 00-7-7zm0 9.5A2.5 2.5 0 1112 6.5a2.5 2.5 0 010 5z" fill="#8fa093"/></svg>';
+    const sub = lineNames ? `<span class="sg-sub">${esc(lineNames)}</span>` : (STATIONS[n] ? '' : '<span class="sg-sub">住所として検索</span>');
+    return `<div class="suggest-item" data-name="${esc(n)}">${pin}<span class="sg-name">${esc(n)}</span>${sub}${tag}</div>`;
+  };
+
+  box.innerHTML = list.map(it => it.kind === 'current' ? `
     <div class="suggest-item" data-name="現在地">
       <svg viewBox="0 0 24 24" width="15" height="15"><circle cx="12" cy="12" r="3.2" fill="#1668b3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3" stroke="#1668b3" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="7" fill="none" stroke="#1668b3" stroke-width="2"/></svg>
-      <span style="color:#1668b3;font-weight:800">現在地</span>
-      <span class="st-lines" style="font-size:10px;color:#8fa093">GPSで取得</span>
-    </div>` : `
-    <div class="suggest-item" data-name="${esc(n)}">
-      <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 2a7 7 0 00-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 00-7-7zm0 9.5A2.5 2.5 0 1112 6.5a2.5 2.5 0 010 5z" fill="#8fa093"/></svg>
-      <span>${esc(n)}</span>
-      <span class="st-lines">${(STATION_LINES[n] || []).map(l => `<i class="line-dot" style="background:${l.color}"></i>`).join('')}</span>
-    </div>`).join('');
+      <span class="sg-name" style="color:#1668b3;font-weight:800">現在地</span>
+      <span class="sg-sub">GPSで取得</span>
+    </div>` : stationItem(it.name, it.kind)).join('');
   const card = $('.search-card');
   const cr = card.getBoundingClientRect();
   const ir = input.getBoundingClientRect();
@@ -650,7 +697,7 @@ function locate() {
     navigator.geolocation.getCurrentPosition(
       pos => {
         const pt = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        STATIONS['現在地'] = pt;
+        setVirtual('現在地', pt);
         resolve(pt);
       },
       err => reject(err),
@@ -659,19 +706,61 @@ function locate() {
   });
 }
 
+/* ================= 住所・地名のジオコーディング(OpenStreetMap Nominatim・無料) ================= */
+const geocodeCache = {};
+async function geocode(query) {
+  if (geocodeCache[query]) return geocodeCache[query];
+  const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&accept-language=ja&countrycodes=jp&q='
+    + encodeURIComponent(query);
+  try {
+    const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    const arr = await res.json();
+    if (!arr.length) return null;
+    const hit = { lat: +arr[0].lat, lng: +arr[0].lon, label: arr[0].display_name };
+    geocodeCache[query] = hit;
+    return hit;
+  } catch { return null; }
+}
+
 /* ================= 検索実行 ================= */
-function collectPoints() {
+// 各入力を「収録駅名」または「仮想地点名」に解決する。
+// 駅でも別名でもなければ住所としてジオコーディングし、最寄り駅へ徒歩接続する。
+async function resolvePoints() {
   const raw = [
     $('#input-origin').value.trim(),
     ...$$('.via-input').map(i => i.value.trim()).filter(Boolean),
     $('#input-dest').value.trim()
   ];
   if (!raw[0] || !raw[raw.length - 1]) { toast('出発地と目的地を入力してください'); return null; }
-  const names = raw.map(resolveAlias); // 別名(大阪→梅田 など)を収録駅名に解決
-  for (let i = 0; i < names.length; i++) {
-    if (!STATIONS[names[i]]) { toast(`「${raw[i]}」はサンプルデータにありません。候補から選択してください`); return null; }
+
+  const nodes = [];
+  for (const r of raw) {
+    if (r === '現在地') {
+      if (!STATIONS['現在地']) {
+        toast('現在地を取得しています…');
+        try { await locate(); } catch { toast('位置情報を取得できませんでした。許可設定を確認してください'); return null; }
+      }
+      nodes.push('現在地');
+      continue;
+    }
+    const alias = resolveAlias(r);
+    if (STATIONS[alias] && !isVirtual(alias)) { nodes.push(alias); continue; } // 収録駅
+    if (isVirtual(r)) { nodes.push(r); continue; }                              // 取得済みの住所
+    // 住所・地名としてジオコーディング
+    toast(`「${r}」を住所検索しています…`);
+    const hit = await geocode(r);
+    if (!hit) { toast(`「${r}」が見つかりませんでした。駅名・住所・施設名で入力してください`); return null; }
+    setVirtual(r, { lat: hit.lat, lng: hit.lng });
+    const near = nearestStations(hit, 1, 9999)[0];
+    if (!near || near.km > 6) {
+      toast(`「${r}」付近に収録駅がありません(最寄りまで約${near ? near.km.toFixed(1) : '?'}km)`);
+      delete VIRTUAL[r]; delete STATIONS[r];
+      return null;
+    }
+    nodes.push(r);
   }
-  const points = names.filter((n, i) => i === 0 || n !== names[i - 1]); // 連続重複を除去
+  const points = nodes.filter((n, i) => i === 0 || n !== nodes[i - 1]); // 連続重複を除去
   if (points.length < 2) { toast('出発地と目的地が同じです'); return null; }
   return points;
 }
@@ -685,16 +774,10 @@ function baseMinutes() {
 
 async function doSearch() {
   hideSuggest();
-  const wantsGeo = [$('#input-origin'), ...$$('.via-input'), $('#input-dest')]
-    .some(i => i.value.trim() === '現在地');
-  if (wantsGeo && !STATIONS['現在地']) {
-    toast('現在地を取得しています…');
-    try { await locate(); }
-    catch { toast('位置情報を取得できませんでした。ブラウザの許可設定を確認してください'); return; }
-  }
   await loadFeedDelays(); // 自動取得済みの遅延(バックアップ)を最新化
-  const points = collectPoints();
+  const points = await resolvePoints();
   if (!points) return;
+  recordHistory(points); // 検索履歴に記録
   const baseMin = baseMinutes();
   const dateStr = $('#input-date').value;
   state.lastSearch = { points, mode: state.mode, baseMin, timeType: state.timeType, dateStr };
@@ -1117,6 +1200,62 @@ function renderPassUI() {
   }));
 }
 
+/* ================= 最寄駅情報 ================= */
+function firstLastLabel(line) {
+  const metro = line.operator === 'OSAKAMETRO';
+  return { first: '5:00頃', last: metro ? '24:00頃' : '24:30頃' };
+}
+
+async function showNearStation() {
+  toast('現在地を取得しています…');
+  try { await locate(); } catch { toast('位置情報を取得できませんでした。許可設定を確認してください'); return; }
+  fetchLiveJRDelays().catch(() => {}); // JR遅延を最新化(待たずに開く)
+  loadFeedDelays().catch(() => {});
+  const near = nearestStations(STATIONS['現在地'], 4, 9999);
+  if (!near.length) { toast('近くに収録駅がありません'); return; }
+  renderNearModal(near);
+  $('#near-modal').classList.remove('hidden');
+}
+
+function renderNearModal(near) {
+  const dmap = delayMap();
+  const main = near[0];
+  const walkMin = Math.max(1, Math.round(main.km * 1.25 / 4.8 * 60) + 1);
+  const lines = STATION_LINES[main.name] || [];
+  const lineRows = lines.map(line => {
+    const fl = firstLastLabel(line);
+    const d = dmap[line.id];
+    let status;
+    if (d && d.min === 'suspend') status = '<b style="color:#7b1020">運転見合わせ</b>';
+    else if (d) status = `<b style="color:var(--red)">遅延 +${d.min}分</b>`;
+    else status = '<b style="color:var(--green-bright)">平常運転(目安)</b>';
+    return `<div class="near-line">
+      <div class="near-line-head"><i style="background:${line.color}"></i>${esc(line.name)}</div>
+      <div class="near-line-meta">始発 ${fl.first} ・ 終電 ${fl.last}(目安)<br>${status}</div>
+    </div>`;
+  }).join('');
+  const others = near.slice(1).map(s =>
+    `<button class="near-other" data-name="${esc(s.name)}">${esc(s.name)} <small>約${(s.km * 1.25).toFixed(1)}km</small></button>`).join('');
+  $('#near-body').innerHTML = `
+    <div class="near-main">
+      <div class="near-dist">現在地から 約${(main.km * 1.25).toFixed(1)}km ・ 徒歩約${walkMin}分</div>
+      <div class="near-name">${esc(main.name)}</div>
+    </div>
+    <div class="near-lines">${lineRows || '<p class="card-sub">路線情報なし</p>'}</div>
+    <button id="near-set-origin" class="primary-btn small" data-name="${esc(main.name)}">この駅を出発地に設定</button>
+    ${others ? `<div class="near-others-label">他の近隣駅</div><div class="near-others">${others}</div>` : ''}
+    <p class="demo-note" style="padding:2px 2px 4px">始発・終電は時間帯モデルによる目安です。遅延はJRのみ実データ、他社は手動登録分を表示します。</p>`;
+  $('#near-set-origin').addEventListener('click', e => {
+    $('#input-origin').value = e.target.dataset.name;
+    $('#near-modal').classList.add('hidden');
+    toast(`出発地を${e.target.dataset.name}に設定しました`);
+  });
+  $$('#near-body .near-other').forEach(b => b.addEventListener('click', () => {
+    const s = near.find(x => x.name === b.dataset.name);
+    renderNearModal([s, ...near.filter(x => x.name !== s.name)]);
+  }));
+}
+
 /* ================= 初期化 ================= */
 function init() {
   // 日時デフォルト
@@ -1197,6 +1336,10 @@ function init() {
   $('#btn-delay-add').addEventListener('click', addDelay);
 
   // フリーパスモーダル
+  $('#btn-near').addEventListener('click', showNearStation);
+  $('#near-done').addEventListener('click', () => $('#near-modal').classList.add('hidden'));
+  $('#near-modal').addEventListener('click', e => { if (e.target.id === 'near-modal') $('#near-modal').classList.add('hidden'); });
+
   $('#btn-pass').addEventListener('click', () => $('#pass-modal').classList.remove('hidden'));
   $('#menu-pass').addEventListener('click', () => $('#pass-modal').classList.remove('hidden'));
   $('#pass-done').addEventListener('click', () => $('#pass-modal').classList.add('hidden'));
