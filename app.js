@@ -28,7 +28,8 @@ function yen(n) { return '¥' + n.toLocaleString('ja-JP'); }
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-function lineById(id) { return LINES.find(l => l.id === id); }
+const WALK_LINE = { id: 'WALK', name: '徒歩', short: '徒歩', color: '#5c6b70', operator: 'WALK' };
+function lineById(id) { return id === 'WALK' ? WALK_LINE : LINES.find(l => l.id === id); }
 
 let toastTimer = null;
 function toast(msg) {
@@ -85,6 +86,41 @@ function resolveAlias(name) {
 const STATION_LINES = {};
 for (const line of LINES) for (const st of line.stations) (STATION_LINES[st] = STATION_LINES[st] || []).push(line);
 
+/* 近接駅の徒歩連絡(同一路線で隣接しない0.6km以内の駅同士)を事前計算
+   例: 大阪天満宮↔南森町、北新地↔梅田、心斎橋↔四ツ橋、京都河原町↔祇園四条 */
+const WALK_PAIRS = (() => {
+  const adjacent = new Set();
+  for (const line of LINES) {
+    const n = line.stations.length;
+    const hops = line.loop ? n : n - 1;
+    for (let i = 0; i < hops; i++) {
+      const a = line.stations[i], b = line.stations[(i + 1) % n];
+      adjacent.add(a < b ? a + '|' + b : b + '|' + a);
+    }
+  }
+  const names = Object.keys(STATIONS);
+  const pairs = [];
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i + 1; j < names.length; j++) {
+      const a = names[i], b = names[j];
+      if (adjacent.has(a < b ? a + '|' + b : b + '|' + a)) continue;
+      const d = haversine(STATIONS[a], STATIONS[b]);
+      if (d <= 0.6) {
+        pairs.push({ a, b, km: +(d * 1.25).toFixed(2), min: Math.max(2, Math.round(d * 1.25 / 4.8 * 60) + 2) });
+      }
+    }
+  }
+  return pairs;
+})();
+
+function nearestStations(pt, count, maxKm) {
+  const sorted = Object.keys(STATIONS)
+    .filter(n => n !== '現在地')
+    .map(n => ({ name: n, km: haversine(pt, STATIONS[n]) }))
+    .sort((x, y) => x.km - y.km);
+  return sorted.filter((s, i) => i < count && (i === 0 || s.km <= maxKm));
+}
+
 /* ================= 経路探索(電車) ================= */
 class Heap {
   constructor() { this.a = []; }
@@ -127,6 +163,20 @@ function buildAdj(excludeSet) {
       (adj[b] = adj[b] || []).push({ to: a, line: line.id, min: line.times[i], km: line.km[i] });
     }
   }
+  // 近接駅の徒歩連絡
+  for (const p of WALK_PAIRS) {
+    (adj[p.a] = adj[p.a] || []).push({ to: p.b, line: 'WALK', min: p.min, km: p.km });
+    (adj[p.b] = adj[p.b] || []).push({ to: p.a, line: 'WALK', min: p.min, km: p.km });
+  }
+  // 現在地 → 近隣駅への徒歩接続(GPS取得後のみ)
+  if (STATIONS['現在地']) {
+    for (const s of nearestStations(STATIONS['現在地'], 4, 4)) {
+      const km = +(s.km * 1.25).toFixed(2);
+      const min = Math.max(1, Math.round(km / 4.8 * 60) + 1);
+      (adj['現在地'] = adj['現在地'] || []).push({ to: s.name, line: 'WALK', min, km });
+      (adj[s.name] = adj[s.name] || []).push({ to: '現在地', line: 'WALK', min, km });
+    }
+  }
   return adj;
 }
 
@@ -142,7 +192,8 @@ function dijkstra(adj, from, to, cfg) {
     if (d > (dist.get(key) ?? Infinity)) continue;
     if (st === to) return reconstruct(prev, key);
     for (const e of (adj[st] || [])) {
-      const transfer = ln !== '*' && e.line !== ln;
+      // 徒歩連絡は乗換ペナルティなし(所要時間に連絡時間込み)
+      const transfer = ln !== '*' && e.line !== ln && e.line !== 'WALK' && ln !== 'WALK';
       const w = e.min + (transfer ? cfg.tp : 0) + (cfg.kmW ? cfg.kmW(e.line) * e.km : 0);
       const nk = e.to + '|' + e.line;
       const nd = d + w;
@@ -199,6 +250,7 @@ function calcFare(legs, passId) {
   const pass = PASSES.find(p => p.id === passId) || PASSES[0];
   const groups = [];
   for (const leg of legs) {
+    if (leg.lineId === 'WALK') continue; // 徒歩は運賃なし(前後の同一事業者は通し運賃)
     const op = lineById(leg.lineId).operator;
     const last = groups[groups.length - 1];
     if (last && last.op === op) last.km += leg.km;
@@ -234,7 +286,7 @@ function buildRoute(legs, sig, dmap, passId, passPriority) {
   const h = hashStr(sig);
   return {
     legs, sig,
-    transfers: legs.length - 1,
+    transfers: Math.max(0, legs.filter(l => l.lineId !== 'WALK').length - 1),
     rideMin, delayTotal,
     fare: calcFare(legs, passId),
     congestion: h % 3,
@@ -245,10 +297,14 @@ function buildRoute(legs, sig, dmap, passId, passPriority) {
 }
 
 function computeTimes(r, dep) {
-  let cur = dep + r.firstWait;
+  let cur = dep;
+  let boarded = false;
   const h = hashStr(r.sig);
   r.legs.forEach((leg, i) => {
-    if (i > 0) cur += 3 + (h + i) % 4; // 乗換待ち
+    if (leg.lineId !== 'WALK') {
+      cur += boarded ? 3 + (h + i) % 4 : r.firstWait; // 乗車待ち(徒歩は待ちなし)
+      boarded = true;
+    }
     leg.depTime = cur;
     leg.arrTime = cur + leg.min + leg.delay;
     cur = leg.arrTime;
@@ -309,6 +365,7 @@ function searchTrainRoutes(points, baseMin, timeType, passId) {
 }
 
 function legDirection(leg) {
+  if (leg.lineId === 'WALK') return '徒歩連絡';
   const line = lineById(leg.lineId);
   const n = line.stations.length;
   const i0 = line.stations.indexOf(leg.stations[0]);
@@ -333,7 +390,9 @@ function searchPathRoute(points, mode, baseMin, timeType) {
 
 /* ================= Googleマップ連携 ================= */
 function gmapsUrl(points, mode) {
-  const enc = n => encodeURIComponent(n + '駅');
+  const enc = n => (n === '現在地' && STATIONS['現在地'])
+    ? `${STATIONS['現在地'].lat.toFixed(6)},${STATIONS['現在地'].lng.toFixed(6)}`
+    : encodeURIComponent(n + '駅');
   if (mode === 'train') {
     // transitモードは経由地パラメータ非対応のため、経由地ありはマルチストップ形式で開く
     if (points.length > 2) return 'https://www.google.com/maps/dir/' + points.map(enc).join('/');
@@ -418,20 +477,26 @@ function showSuggest(input) {
   const q = input.value.trim();
   let names;
   if (q) {
-    names = Object.keys(STATIONS).filter(n => n.includes(q));
-    // 別名(大阪→梅田 など)でalso一致させる
+    names = Object.keys(STATIONS).filter(n => n !== '現在地' && n.includes(q));
+    // 別名(大阪→梅田 など)でも一致させる
     if (typeof ALIASES !== 'undefined') {
       for (const a in ALIASES) {
         if (a.includes(q) && !names.includes(ALIASES[a])) names.push(ALIASES[a]);
       }
     }
   } else {
-    names = POPULAR;
+    names = POPULAR.slice();
   }
   names = names.slice(0, 8);
+  if (!q || '現在地'.includes(q)) names.unshift('現在地');
   const box = $('#suggest-box');
   if (!names.length) { hideSuggest(); return; }
-  box.innerHTML = names.map(n => `
+  box.innerHTML = names.map(n => n === '現在地' ? `
+    <div class="suggest-item" data-name="現在地">
+      <svg viewBox="0 0 24 24" width="15" height="15"><circle cx="12" cy="12" r="3.2" fill="#1668b3"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3" stroke="#1668b3" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="12" r="7" fill="none" stroke="#1668b3" stroke-width="2"/></svg>
+      <span style="color:#1668b3;font-weight:800">現在地</span>
+      <span class="st-lines" style="font-size:10px;color:#8fa093">GPSで取得</span>
+    </div>` : `
     <div class="suggest-item" data-name="${esc(n)}">
       <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 2a7 7 0 00-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 00-7-7zm0 9.5A2.5 2.5 0 1112 6.5a2.5 2.5 0 010 5z" fill="#8fa093"/></svg>
       <span>${esc(n)}</span>
@@ -446,6 +511,22 @@ function showSuggest(input) {
 function hideSuggest() {
   $('#suggest-box').classList.add('hidden');
   activeInput = null;
+}
+
+/* ================= 現在地(GPS) ================= */
+function locate() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) { reject(new Error('geolocation unsupported')); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        const pt = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+        STATIONS['現在地'] = pt;
+        resolve(pt);
+      },
+      err => reject(err),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 }
+    );
+  });
 }
 
 /* ================= 検索実行 ================= */
@@ -472,8 +553,15 @@ function baseMinutes() {
   return h * 60 + m;
 }
 
-function doSearch() {
+async function doSearch() {
   hideSuggest();
+  const wantsGeo = [$('#input-origin'), ...$$('.via-input'), $('#input-dest')]
+    .some(i => i.value.trim() === '現在地');
+  if (wantsGeo && !STATIONS['現在地']) {
+    toast('現在地を取得しています…');
+    try { await locate(); }
+    catch { toast('位置情報を取得できませんでした。ブラウザの許可設定を確認してください'); return; }
+  }
   const points = collectPoints();
   if (!points) return;
   const baseMin = baseMinutes();
@@ -532,7 +620,7 @@ function renderResults() {
     if (r.passName && r.legs.some(l => l.passFree)) tags.push(`<span class="tag pass">${esc(r.passName)}</span>`);
     for (const [cls, label] of r.badges) tags.push(`<span class="tag ${cls}">${label}</span>`);
     if (r.delayTotal) tags.push(`<span class="tag delay">遅延 +${r.delayTotal}分</span>`);
-    const chips = r.legs.map(l => {
+    const chips = r.legs.filter(l => l.lineId !== 'WALK').map(l => {
       const line = lineById(l.lineId);
       return `<span class="route-line-chip"><i style="background:${line.color}"></i>${esc(line.short)}</span>`;
     }).join('<span style="color:#b9c6ba;font-weight:800">›</span>');
@@ -629,6 +717,17 @@ function renderDetail() {
       const prevArr = r.legs[i - 1].arrTime;
       rows.push(stationRow(stName, cls, fmtTime(prevArr), `発 ${fmtTime(leg.depTime)}`, vias.has(stName)));
     }
+    if (leg.lineId === 'WALK') {
+      rows.push(`
+      <div class="tl-leg">
+        <div class="tl-leg-rail walk-rail"></div>
+        <div class="tl-leg-body">
+          <div class="leg-line-name" style="color:#5c6b70">徒歩</div>
+          <div class="leg-sub">約${Math.round(leg.km * 1000)}m ・ ${leg.min}分</div>
+        </div>
+      </div>`);
+      return;
+    }
     const platform = (hashStr(leg.lineId + leg.stations[0]) % 11) + 1;
     const delayHtml = leg.delayInfo ? `
       <div class="leg-delay">${warnSvg()}
@@ -705,7 +804,11 @@ function showRouteOnMap(route) {
     const pts = leg.stations.map(n => [STATIONS[n].lat, STATIONS[n].lng]);
     all.push(...pts);
     L.polyline(pts, { color: '#fff', weight: 9, opacity: .9 }).addTo(routeGroup);
-    L.polyline(pts, { color: line.color, weight: 5, opacity: 1 }).addTo(routeGroup);
+    if (leg.lineId === 'WALK') {
+      L.polyline(pts, { color: '#5c6b70', weight: 4, dashArray: '5 8' }).addTo(routeGroup);
+    } else {
+      L.polyline(pts, { color: line.color, weight: 5, opacity: 1 }).addTo(routeGroup);
+    }
   }
   const { points } = state.lastSearch;
   const vias = points.slice(1, -1);
@@ -874,6 +977,12 @@ function init() {
     e.preventDefault();
     activeInput.value = item.dataset.name;
     hideSuggest();
+    if (item.dataset.name === '現在地') {
+      locate().then(pt => {
+        const near = nearestStations(pt, 1, 9999)[0];
+        toast(`現在地を取得しました(最寄り: ${near.name}駅 約${near.km.toFixed(1)}km)`);
+      }).catch(() => toast('位置情報を取得できませんでした。ブラウザの許可設定を確認してください'));
+    }
   });
   document.addEventListener('click', e => {
     if (!e.target.closest('.suggest-item') && !e.target.closest('.point-input')) hideSuggest();
