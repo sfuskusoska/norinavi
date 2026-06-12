@@ -333,10 +333,33 @@ function assignBadges(routes) {
   }
 }
 
+const MAX_ROUTES = 6;
+
 function searchTrainRoutes(points, baseMin, timeType, passId) {
-  const suspended = new Set(suspendedLineIds());
-  const adj = buildAdj(suspended);
+  const suspended = suspendedLineIds();
   const pass = PASSES.find(p => p.id === passId) || PASSES[0];
+  const dmap = delayMap();
+  const seen = new Set();
+  const routes = [];
+
+  // 除外路線の組み合わせごとに隣接リストをキャッシュ
+  const adjCache = {};
+  function getAdj(ban) {
+    const ex = new Set(suspended);
+    if (ban) for (const b of ban) ex.add(b);
+    const key = [...ex].sort().join(',');
+    return adjCache[key] || (adjCache[key] = buildAdj(ex));
+  }
+  function tryRoute(cfg, ban) {
+    if (routes.length >= MAX_ROUTES) return;
+    const legs = routeWithVias(points, cfg, getAdj(ban));
+    if (!legs || !legs.length) return;
+    const sig = legs.map(l => l.lineId + ':' + l.stations[0] + '>' + l.stations[l.stations.length - 1]).join('|');
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    routes.push(buildRoute(legs, sig, dmap, passId, cfg.passPriority));
+  }
+
   const cfgs = [
     { tp: 5 },
     { tp: 25 },
@@ -347,19 +370,23 @@ function searchTrainRoutes(points, baseMin, timeType, passId) {
   if (pass.covers.length) {
     cfgs.unshift({ tp: 5, kmW: id => pass.covers.includes(lineById(id).operator) ? 0 : 2.0, passPriority: true });
   }
-  const dmap = delayMap();
-  const seen = new Set();
-  const routes = [];
-  for (const cfg of cfgs) {
-    const legs = routeWithVias(points, cfg, adj);
-    if (!legs || !legs.length) continue;
-    const sig = legs.map(l => l.lineId + ':' + l.stations[0] + '>' + l.stations[l.stations.length - 1]).join('|');
-    if (seen.has(sig)) continue;
-    seen.add(sig);
-    routes.push(buildRoute(legs, sig, dmap, passId, cfg.passPriority));
+
+  // 1) コスト設定違いでの基本候補
+  for (const cfg of cfgs) tryRoute(cfg, null);
+
+  // 2) 代替ルート: 見つかった経路の使用路線を1本ずつ除外して再探索(連鎖的に別ルートを発掘)
+  for (let i = 0; i < routes.length && routes.length < MAX_ROUTES; i++) {
+    for (const leg of routes[i].legs) {
+      if (leg.lineId === 'WALK') continue;
+      if (routes.length >= MAX_ROUTES) break;
+      tryRoute({ tp: 8 }, [leg.lineId]);
+    }
   }
+
   for (const r of routes) scheduleRoute(r, baseMin, timeType);
-  routes.sort((a, b) => (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) || a.arr - b.arr);
+  routes.sort((a, b) =>
+    (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) ||
+    a.arr - b.arr || a.transfers - b.transfers);
   assignBadges(routes);
   return routes;
 }
