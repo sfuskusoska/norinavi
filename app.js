@@ -265,72 +265,103 @@ function calcFare(legs, passId) {
   return { ticket, ic, passApplied };
 }
 
-/* ================= リアルタイム遅延フィード(公式運行情報) ================= */
-const AUTO_DELAY_MIN = 10; // 遅延報告のある路線は+10分と仮定して反映
+/* ================= リアルタイム遅延(JR西日本 列車走行位置) ================= */
+// 収録JR路線 → JR西日本「列車走行位置」APIのエンドポイント対応
+const JR_REALTIME = [
+  { lineId: 'o_loop',  api: 'osakaloop',    label: '大阪環状線' },
+  { lineId: 'o_jrkk',  api: 'kobesanyo',    label: '京都線・神戸線' },
+  { lineId: 'o_tozai', api: 'gakkentoshi',  label: 'JR東西線・学研都市線' }
+];
+const JR_API_BASE = 'https://www.train-guide.westjr.co.jp/api/v3/';
 
-let autoDelayData = { updated: 0, delays: [] };
-let autoDelayFetchedAt = 0;
-
-async function loadAutoDelays(force) {
-  if (!force && Date.now() - autoDelayFetchedAt < 5 * 60 * 1000) return;
-  try {
-    const res = await fetch('live/delays.json', { cache: 'no-store' });
-    if (!res.ok) return;
-    autoDelayData = await res.json();
-    autoDelayFetchedAt = Date.now();
-    renderDelays();
-  } catch { /* オフライン時などは無視 */ }
-}
-
-/* フィードの社名と収録路線の対応(誤マッチ防止) */
-const COMPANY_HINTS = [
-  ['JR', ['JR']],
-  ['阪急', ['阪急']],
-  ['阪神', ['阪神']],
-  ['京阪', ['京阪']],
-  ['近鉄', ['近鉄', '近畿日本']],
-  ['南海', ['南海']],
-  ['小田急', ['小田急']],
-  ['東急', ['東急']],
-  ['Osaka Metro', ['大阪市高速', 'Osaka Metro', '大阪メトロ']]
+// ブラウザから他ドメインを取得するための公開CORSプロキシ(上から順に試す)
+const CORS_PROXIES = [
+  u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+  u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  u => 'https://thingproxy.freeboard.io/fetch/' + u
 ];
 
-function companyMatches(line, company) {
-  for (const [token, keys] of COMPANY_HINTS) {
-    if (line.name.includes(token)) return keys.some(k => (company || '').includes(k));
+let feedDelays = {};    // GitHub Actions が保存した live/delays.json 由来(バックアップ)
+let liveDelays = {};    // 取得ボタンでブラウザが直接取得した最新分
+let liveFetchedAt = 0;
+let feedUpdatedAt = 0;
+
+async function proxyFetchJson(url) {
+  for (const wrap of CORS_PROXIES) {
+    try {
+      const res = await fetch(wrap(url), { cache: 'no-store' });
+      if (!res.ok) continue;
+      return await res.json();
+    } catch { /* 次のプロキシへ */ }
   }
-  return true;
+  return null;
 }
 
-function matchFeedLine(feed) {
-  const fn = (feed.name || '').replace(/\s/g, '');
-  if (!fn) return [];
-  return LINES.filter(line => {
-    if (!companyMatches(line, feed.company)) return false;
-    return line.name.includes(fn) || fn.includes(line.short) || line.short.includes(fn);
-  });
+function jrEntry(lineId, max, trains, updateStr) {
+  const line = lineById(lineId);
+  return {
+    lineId, min: max, auto: true, source: 'live',
+    reason: '遅延(JR西日本 走行位置)',
+    comment: `${line.short}で最大${max}分の遅延(走行${trains}本)`,
+    ts: updateStr ? Date.parse(updateStr) : Date.now()
+  };
+}
+
+// 取得ボタン: 今この瞬間のJR遅延をブラウザから直接取得(約8秒鮮度)
+async function fetchLiveJRDelays() {
+  const entries = {};
+  let ok = 0;
+  await Promise.all(JR_REALTIME.map(async ({ lineId, api }) => {
+    const data = await proxyFetchJson(JR_API_BASE + api + '.json');
+    if (!data || !Array.isArray(data.trains)) return;
+    ok++;
+    const max = data.trains.reduce((m, t) => Math.max(m, t.delayMinutes || 0), 0);
+    if (max > 0) entries[lineId] = jrEntry(lineId, max, data.trains.length, data.update);
+  }));
+  if (ok === 0) return { ok: false };
+  liveDelays = entries;
+  liveFetchedAt = Date.now();
+  renderDelays();
+  return { ok: true, lines: ok, delayed: Object.keys(entries).length };
+}
+
+// GitHub Actions が保存した live/delays.json を読み込み(初期表示・バックアップ)
+async function loadFeedDelays() {
+  try {
+    const res = await fetch('live/delays.json?t=' + Date.now(), { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    feedUpdatedAt = (data.updated || 0) * 1000;
+    const m = {};
+    for (const d of (data.delays || [])) {
+      const line = lineById(d.lineId);
+      if (!line || typeof d.min !== 'number' || d.min <= 0) continue;
+      m[d.lineId] = {
+        lineId: d.lineId, min: d.min, auto: true, source: 'feed',
+        reason: '遅延(JR西日本 走行位置)',
+        comment: `${line.short}で最大${d.min}分の遅延${d.trains ? `(走行${d.trains}本)` : ''}`,
+        ts: feedUpdatedAt || Date.now()
+      };
+    }
+    feedDelays = m;
+    renderDelays();
+  } catch { /* オフライン等は無視 */ }
 }
 
 function autoDelayEntries() {
-  const m = {};
-  for (const f of (autoDelayData.delays || [])) {
-    for (const line of matchFeedLine(f)) {
-      if (!m[line.id]) {
-        m[line.id] = {
-          lineId: line.id, min: AUTO_DELAY_MIN, auto: true,
-          reason: '遅延(公式運行情報)',
-          comment: `${f.company} ${f.name}で遅延が報告されています`,
-          ts: f.since ? f.since * 1000 : Date.now()
-        };
-      }
-    }
+  // 直接取得済みなら対象JR路線は live を正とし、それ以外は feed で補完
+  if (liveFetchedAt) {
+    const covered = new Set(JR_REALTIME.map(j => j.lineId));
+    const m = {};
+    for (const [k, v] of Object.entries(feedDelays)) if (!covered.has(k)) m[k] = v;
+    return { ...m, ...liveDelays };
   }
-  return m;
+  return { ...feedDelays };
 }
 
 function delayMap() {
-  const m = autoDelayEntries();              // 公式フィード由来
-  for (const d of store.delays) m[d.lineId] = d; // 手動登録が優先
+  const m = autoDelayEntries();               // JR西日本のリアルタイム由来
+  for (const d of store.delays) m[d.lineId] = d; // 手動登録が最優先
   return m;
 }
 
@@ -661,7 +692,7 @@ async function doSearch() {
     try { await locate(); }
     catch { toast('位置情報を取得できませんでした。ブラウザの許可設定を確認してください'); return; }
   }
-  await loadAutoDelays(); // 公式運行情報を更新(5分キャッシュ)
+  await loadFeedDelays(); // 自動取得済みの遅延(バックアップ)を最新化
   const points = collectPoints();
   if (!points) return;
   const baseMin = baseMinutes();
@@ -706,9 +737,10 @@ function renderResults() {
   if (mode === 'train' && activeDelays.length) {
     banners.push(`<div class="banner warn">${warnSvg()}<span>ユーザー登録の遅延情報 ${activeDelays.length}件を所要時間に反映しています</span></div>`);
   }
-  const autoCount = Object.keys(autoDelayEntries()).length;
-  if (mode === 'train' && autoCount) {
-    banners.push(`<div class="banner warn">${warnSvg()}<span>公式運行情報: 収録${autoCount}路線で遅延報告あり(+${AUTO_DELAY_MIN}分想定で反映)</span></div>`);
+  const autoEntries = Object.values(autoDelayEntries());
+  if (mode === 'train' && autoEntries.length) {
+    const txt = autoEntries.map(d => `${lineById(d.lineId).short}+${d.min}分`).join('・');
+    banners.push(`<div class="banner warn">${warnSvg()}<span>JR西日本の最新運行情報: ${esc(txt)} を所要時間に反映しています</span></div>`);
   }
   if (mode === 'train' && !banners.length) {
     banners.push(`<div class="banner info">${infoSvg()}<span>運賃は通常運賃を表示しています(きっぷ/IC)</span></div>`);
@@ -966,25 +998,29 @@ function renderDelays() {
   const auto = Object.values(autoDelayEntries());
   const list = $('#delay-list');
 
-  // 公式運行情報(自動取得)セクション
-  const updated = autoDelayData.updated ? new Date(autoDelayData.updated * 1000) : null;
-  const feedTotal = (autoDelayData.delays || []).length;
+  // JR西日本リアルタイム遅延セクション
+  const fresh = liveFetchedAt ? new Date(liveFetchedAt) : (feedUpdatedAt ? new Date(feedUpdatedAt) : null);
+  const srcLabel = liveFetchedAt ? '取得ボタンで直接取得' : (feedUpdatedAt ? '自動取得(バックアップ)' : null);
   let html = `
     <div class="card delay-form-card">
-      <h2 class="card-title">公式運行情報(自動取得)</h2>
-      <p class="card-sub">外部の運行情報フィードと連携すると、収録路線に一致した遅延が検索結果に+${AUTO_DELAY_MIN}分想定で自動反映されます。${updated ? `最終更新: ${updated.getMonth() + 1}/${updated.getDate()} ${fmtTime(updated.getHours() * 60 + updated.getMinutes())}` : '現在は連携待機中です(定番だった無料フィードが2022年に終了したため)。下のフォームから手動で登録できます。'}</p>
+      <h2 class="card-title">JR西日本 リアルタイム遅延</h2>
+      <p class="card-sub">JR西日本「列車走行位置」の公式データ(約8秒鮮度)から、収録JR路線(大阪環状線・京都線神戸線・JR東西線)の実際の遅延分を取得します。${fresh ? `最終取得: ${fresh.getMonth() + 1}/${fresh.getDate()} ${fmtTime(fresh.getHours() * 60 + fresh.getMinutes())}・${srcLabel}` : ''}</p>
+      <button id="btn-fetch-live" class="primary-btn small">
+        <svg viewBox="0 0 24 24" width="16" height="16" style="margin-right:5px"><path d="M21 12a9 9 0 11-3-6.7M21 4v4h-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        JRの最新遅延を取得
+      </button>
       ${auto.length ? auto.map(d => {
         const line = lineById(d.lineId);
+        const dt = new Date(d.ts);
         return `
       <div class="delay-item">
         <div class="delay-item-body">
           <div class="delay-item-line"><i style="background:${line.color}"></i>${esc(line.name)}</div>
-          <div class="delay-item-status">遅延が報告されています(+${AUTO_DELAY_MIN}分想定)</div>
-          <div class="delay-item-sub">${esc(d.comment)}</div>
+          <div class="delay-item-status">最大${d.min}分の遅延</div>
+          <div class="delay-item-sub">${esc(d.comment)}<br>${d.source === 'live' ? '直接取得' : '自動取得'} ${isNaN(dt) ? '' : `${dt.getMonth() + 1}/${dt.getDate()} ${fmtTime(dt.getHours() * 60 + dt.getMinutes())} 時点`}</div>
         </div>
       </div>`;
-      }).join('') : '<p class="card-sub" style="margin:0">現在、収録路線で報告されている遅延はありません。</p>'}
-      ${feedTotal ? `<p class="card-sub" style="margin:8px 0 0">全国では ${feedTotal} 路線で遅延が報告されています</p>` : ''}
+      }).join('') : `<p class="card-sub" style="margin:8px 0 0">${fresh ? '現在、収録JR路線に目立った遅延はありません。' : '「取得」ボタンで最新の運行状況を確認できます。'}</p>`}
     </div>`;
 
   // 手動登録セクション
@@ -1006,6 +1042,8 @@ function renderDelays() {
     }).join('');
   }
   list.innerHTML = html;
+  const fetchBtn = $('#btn-fetch-live');
+  if (fetchBtn) fetchBtn.addEventListener('click', runLiveFetch);
   $$('#delay-list .delay-del').forEach(b => b.addEventListener('click', () => {
     store.delays = store.delays.filter(x => String(x.id) !== b.dataset.id);
     renderDelays();
@@ -1022,6 +1060,25 @@ function renderDelays() {
     ? `<div class="banner warn" style="cursor:pointer" id="home-delay-banner">${warnSvg()}<span>遅延情報 ${total}件(手動${delays.length}・公式${auto.length})が検索結果に反映されます</span></div>`
     : '';
   if (total) $('#home-delay-banner').addEventListener('click', () => switchTab('delay'));
+}
+
+let liveFetching = false;
+async function runLiveFetch() {
+  if (liveFetching) return;
+  liveFetching = true;
+  const btn = $('#btn-fetch-live');
+  if (btn) { btn.disabled = true; btn.style.opacity = '.6'; }
+  toast('JRの最新運行情報を取得中…');
+  try {
+    const r = await fetchLiveJRDelays();
+    if (!r.ok) toast('取得できませんでした(プロキシ混雑の可能性・時間をおいて再試行)');
+    else if (r.delayed) toast(`取得完了: ${r.delayed}路線で遅延あり`);
+    else toast('取得完了: 収録JR路線に目立った遅延はありません');
+  } finally {
+    liveFetching = false;
+    const b = $('#btn-fetch-live');
+    if (b) { b.disabled = false; b.style.opacity = ''; }
+  }
 }
 
 function addDelay() {
@@ -1162,7 +1219,7 @@ function init() {
   renderDelays();
   renderPassUI();
   updateHeader();
-  loadAutoDelays(true);
+  loadFeedDelays();
 
   // デモ用の初期値
   $('#input-origin').value = '梅田';

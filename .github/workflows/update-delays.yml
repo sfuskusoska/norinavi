@@ -1,11 +1,11 @@
 name: 遅延情報の自動更新
 
-# かつて定番だった無料遅延フィード「鉄道遅延情報のjson」は2022年5月に終了。
-# 代替フィードを DELAY_FEED_URL に設定したら schedule を有効化する。
+# JR西日本「列車走行位置」公式データから収録JR路線の遅延を定期取得する。
+# 取得ボタン(アプリ内・ブラウザ直接)が最速。これはそのバックアップ。
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: '*/30 * * * *'
+  schedule:
+    - cron: '*/15 * * * *'
 
 permissions:
   contents: write
@@ -17,23 +17,11 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    env:
-      # 連携先フィードのURL(JSON配列 [{name, company, lastupdate_gmt}, ...] 形式を想定)
-      DELAY_FEED_URL: ''
     steps:
       - uses: actions/checkout@v4
 
-      - name: 遅延フィードを取得して変換
-        run: |
-          if [ -z "$DELAY_FEED_URL" ]; then
-            echo "DELAY_FEED_URL が未設定のためスキップします"
-            exit 0
-          fi
-          curl -fsS --retry 3 --retry-delay 5 --max-time 30 \
-            -A "norinavi-demo (https://github.com/sfuskusoska/norinavi)" \
-            "$DELAY_FEED_URL" -o /tmp/delay.json \
-            || { echo "取得失敗(前回データを維持して終了)"; exit 0; }
-          python3 scripts/build_delays.py /tmp/delay.json live/delays.json
+      - name: JR西日本の運行情報を取得して変換
+        run: python3 scripts/build_delays.py live/delays.json
 
       - name: 変更があればコミット
         run: |
@@ -43,6 +31,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "変更なし"
           else
-            git commit -m "chore: 遅延情報を自動更新"
+            git commit -m "chore: 遅延情報を自動更新 [skip ci]"
             git push
           fi
