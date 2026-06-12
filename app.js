@@ -433,12 +433,33 @@ function computeTimes(r, dep) {
   return cur - dep;
 }
 
+// 運行時間帯: 始発5:00〜終電(最終乗車0:30頃)。0:30〜5:00は運行なし。
+const FIRST_DEP = 300;    // 5:00
+const LAST_BOARD = 30;    // 翌0:30(時刻帯の0〜30分)まで乗車可
+function todOf(min) { return ((min % 1440) + 1440) % 1440; }
+function inDeadZone(min) { const t = todOf(min); return t > LAST_BOARD && t < FIRST_DEP; }
+
 function scheduleRoute(r, baseMin, timeType) {
   const dur = computeTimes(r, 0);
-  const dep = timeType === 'arr' ? baseMin - dur : baseMin;
-  r.total = computeTimes(r, dep);
-  r.dep = dep;
-  r.arr = dep + r.total;
+  let dep = timeType === 'arr' ? baseMin - dur : baseMin;
+  computeTimes(r, dep); // 各legの時刻を仮置き
+
+  // 最初の電車が始発前(運行時間外)なら、全体を始発(5:00)まで繰り下げる
+  r.bumped = false;
+  const firstTrain = r.legs.find(l => l.lineId !== 'WALK');
+  if (firstTrain && inDeadZone(firstTrain.depTime)) {
+    const delta = (firstTrain.depTime - todOf(firstTrain.depTime) + FIRST_DEP) - firstTrain.depTime;
+    for (const leg of r.legs) { leg.depTime += delta; leg.arrTime += delta; }
+    dep += delta;
+    r.bumped = true;
+  }
+
+  // 途中の乗車が終電後(デッドゾーン)に入る経路は成立しない
+  r.valid = !r.legs.some(l => l.lineId !== 'WALK' && inDeadZone(l.depTime));
+
+  r.dep = r.legs[0].depTime;
+  r.arr = r.legs[r.legs.length - 1].arrTime;
+  r.total = r.arr - r.dep;
 }
 
 function assignBadges(routes) {
@@ -505,11 +526,12 @@ function searchTrainRoutes(points, baseMin, timeType, passId) {
   }
 
   for (const r of routes) scheduleRoute(r, baseMin, timeType);
-  routes.sort((a, b) =>
+  const valid = routes.filter(r => r.valid); // 終電後に乗り継ぐ経路は除外
+  valid.sort((a, b) =>
     (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) ||
     a.arr - b.arr || a.transfers - b.transfers);
-  assignBadges(routes);
-  return routes;
+  assignBadges(valid);
+  return valid;
 }
 
 function legDirection(leg) {
@@ -784,7 +806,13 @@ async function doSearch() {
 
   if (state.mode === 'train') {
     const routes = searchTrainRoutes(points, baseMin, state.timeType, store.pass);
-    if (!routes.length) { toast('経路が見つかりませんでした(運転見合わせ路線を確認してください)'); return; }
+    if (!routes.length) {
+      const late = state.timeType === 'dep' && (todOf(baseMin) > 30 && todOf(baseMin) < 300);
+      toast(late
+        ? '指定時刻は運行時間外(終電後〜始発前)です。始発は約5:00です'
+        : '終電後・運転見合わせなどにより、その時刻に成立する経路が見つかりませんでした');
+      return;
+    }
     state.routes = routes;
     state.pathResult = null;
     renderResults();
@@ -819,6 +847,9 @@ function renderResults() {
   const activeDelays = store.delays.filter(d => d.min !== 'suspend');
   if (mode === 'train' && activeDelays.length) {
     banners.push(`<div class="banner warn">${warnSvg()}<span>ユーザー登録の遅延情報 ${activeDelays.length}件を所要時間に反映しています</span></div>`);
+  }
+  if (mode === 'train' && state.routes.length && state.routes.every(r => r.bumped)) {
+    banners.push(`<div class="banner info">${infoSvg()}<span>指定時刻は運行時間外(終電後〜始発前)のため、始発(約5:00)以降の電車を表示しています</span></div>`);
   }
   const autoEntries = Object.values(autoDelayEntries());
   if (mode === 'train' && autoEntries.length) {

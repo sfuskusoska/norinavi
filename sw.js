@@ -1,6 +1,7 @@
 // のりかえNavi Service Worker
-const CACHE = 'norinavi-v1';
-const ASSETS = ['./', './index.html', './styles.css', './app.js', './data.js', './manifest.json', './icon.svg'];
+const CACHE = 'norinavi-v2';
+const ASSETS = ['./', './index.html', './styles.css', './app.js', './data.js', './manifest.json',
+  './icon.svg', './icon-192.png', './icon-512.png', './icon-180.png', './icon-512-maskable.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
