@@ -1,0 +1,893 @@
+'use strict';
+
+/* ================= ユーティリティ ================= */
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+function haversine(a, b) {
+  const R = 6371, rad = x => x * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function fmtTime(min) {
+  min = ((Math.round(min) % 1440) + 1440) % 1440;
+  return String(Math.floor(min / 60)).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0');
+}
+function fmtDur(min) {
+  min = Math.round(min);
+  if (min < 60) return `${min}分`;
+  return `${Math.floor(min / 60)}時間${min % 60 ? (min % 60) + '分' : ''}`;
+}
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+function yen(n) { return '¥' + n.toLocaleString('ja-JP'); }
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function lineById(id) { return LINES.find(l => l.id === id); }
+
+let toastTimer = null;
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add('hidden'), 2600);
+}
+
+/* ================= 永続化 ================= */
+const store = {
+  get delays() { try { return JSON.parse(localStorage.getItem('nn_delays') || '[]'); } catch { return []; } },
+  set delays(v) { localStorage.setItem('nn_delays', JSON.stringify(v)); },
+  get pass() { return localStorage.getItem('nn_pass') || 'none'; },
+  set pass(v) { localStorage.setItem('nn_pass', v); }
+};
+
+const state = {
+  mode: 'train',          // train | bike | walk
+  timeType: 'dep',        // dep | arr
+  routes: [],
+  current: null,          // 選択中の電車ルート
+  lastSearch: null,       // { points, mode, baseMin, timeType, dateStr }
+  pathResult: null        // 自転車/徒歩の結果
+};
+
+/* 駅 → 乗り入れ路線 */
+const STATION_LINES = {};
+for (const line of LINES) for (const st of line.stations) (STATION_LINES[st] = STATION_LINES[st] || []).push(line);
+
+/* ================= 経路探索(電車) ================= */
+class Heap {
+  constructor() { this.a = []; }
+  push(x) {
+    const a = this.a; a.push(x);
+    let i = a.length - 1;
+    while (i > 0) { const p = (i - 1) >> 1; if (a[p][0] <= a[i][0]) break; [a[p], a[i]] = [a[i], a[p]]; i = p; }
+  }
+  pop() {
+    const a = this.a, top = a[0], last = a.pop();
+    if (a.length) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1; let m = i;
+        if (l < a.length && a[l][0] < a[m][0]) m = l;
+        if (r < a.length && a[r][0] < a[m][0]) m = r;
+        if (m === i) break;
+        [a[m], a[i]] = [a[i], a[m]]; i = m;
+      }
+    }
+    return top;
+  }
+  get size() { return this.a.length; }
+}
+
+function suspendedLineIds() {
+  return store.delays.filter(d => d.min === 'suspend').map(d => d.lineId);
+}
+
+function buildAdj(excludeSet) {
+  const adj = {};
+  for (const line of LINES) {
+    if (excludeSet.has(line.id)) continue;
+    const n = line.stations.length;
+    const hops = line.loop ? n : n - 1;
+    for (let i = 0; i < hops; i++) {
+      const a = line.stations[i], b = line.stations[(i + 1) % n];
+      (adj[a] = adj[a] || []).push({ to: b, line: line.id, min: line.times[i], km: line.km[i] });
+      (adj[b] = adj[b] || []).push({ to: a, line: line.id, min: line.times[i], km: line.km[i] });
+    }
+  }
+  return adj;
+}
+
+function dijkstra(adj, from, to, cfg) {
+  if (from === to) return null;
+  const dist = new Map(), prev = new Map();
+  const h = new Heap();
+  dist.set(from + '|*', 0);
+  h.push([0, from, '*']);
+  while (h.size) {
+    const [d, st, ln] = h.pop();
+    const key = st + '|' + ln;
+    if (d > (dist.get(key) ?? Infinity)) continue;
+    if (st === to) return reconstruct(prev, key);
+    for (const e of (adj[st] || [])) {
+      const transfer = ln !== '*' && e.line !== ln;
+      const w = e.min + (transfer ? cfg.tp : 0) + (cfg.kmW ? cfg.kmW(e.line) * e.km : 0);
+      const nk = e.to + '|' + e.line;
+      const nd = d + w;
+      if (nd < (dist.get(nk) ?? Infinity)) {
+        dist.set(nk, nd);
+        prev.set(nk, { key, e, from: st });
+        h.push([nd, e.to, e.line]);
+      }
+    }
+  }
+  return null;
+}
+
+function reconstruct(prev, endKey) {
+  const steps = [];
+  let k = endKey;
+  while (prev.has(k)) {
+    const p = prev.get(k);
+    steps.push({ from: p.from, to: p.e.to, line: p.e.line, min: p.e.min, km: p.e.km });
+    k = p.key;
+  }
+  steps.reverse();
+  const legs = [];
+  for (const s of steps) {
+    const last = legs[legs.length - 1];
+    if (last && last.lineId === s.line) {
+      last.stations.push(s.to); last.min += s.min; last.km += s.km;
+    } else {
+      legs.push({ lineId: s.line, stations: [s.from, s.to], min: s.min, km: s.km });
+    }
+  }
+  return legs;
+}
+
+function routeWithVias(points, cfg, adj) {
+  let legs = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const seg = dijkstra(adj, points[i], points[i + 1], cfg);
+    if (!seg) return null;
+    for (const leg of seg) {
+      const last = legs[legs.length - 1];
+      if (last && last.lineId === leg.lineId && last.stations[last.stations.length - 1] === leg.stations[0]) {
+        last.stations.push(...leg.stations.slice(1));
+        last.min += leg.min; last.km += leg.km;
+      } else {
+        legs.push({ ...leg, stations: [...leg.stations] });
+      }
+    }
+  }
+  return legs;
+}
+
+function calcFare(legs, passId) {
+  const pass = PASSES.find(p => p.id === passId) || PASSES[0];
+  const groups = [];
+  for (const leg of legs) {
+    const op = lineById(leg.lineId).operator;
+    const last = groups[groups.length - 1];
+    if (last && last.op === op) last.km += leg.km;
+    else groups.push({ op, km: leg.km });
+  }
+  let ticket = 0, ic = 0, passApplied = false;
+  for (const g of groups) {
+    if (pass.covers.includes(g.op)) { passApplied = true; continue; }
+    const fare = OPERATORS[g.op].fareTable.find(([km]) => g.km <= km)[1];
+    ticket += fare; ic += fare - 5;
+  }
+  return { ticket, ic, passApplied };
+}
+
+function delayMap() {
+  const m = {};
+  for (const d of store.delays) m[d.lineId] = d;
+  return m;
+}
+
+function buildRoute(legs, sig, dmap, passId, passPriority) {
+  const pass = PASSES.find(p => p.id === passId) || PASSES[0];
+  let rideMin = 0, delayTotal = 0;
+  for (const leg of legs) {
+    const line = lineById(leg.lineId);
+    leg.passFree = pass.covers.includes(line.operator);
+    const d = dmap[leg.lineId];
+    leg.delay = (d && d.min !== 'suspend') ? Number(d.min) : 0;
+    leg.delayInfo = leg.delay ? d : null;
+    rideMin += leg.min;
+    delayTotal += leg.delay;
+  }
+  const h = hashStr(sig);
+  return {
+    legs, sig,
+    transfers: legs.length - 1,
+    rideMin, delayTotal,
+    fare: calcFare(legs, passId),
+    congestion: h % 3,
+    firstWait: 2 + h % 9,
+    passPriority: !!passPriority,
+    passName: pass.id !== 'none' && pass.covers.length ? pass.name : null
+  };
+}
+
+function computeTimes(r, dep) {
+  let cur = dep + r.firstWait;
+  const h = hashStr(r.sig);
+  r.legs.forEach((leg, i) => {
+    if (i > 0) cur += 3 + (h + i) % 4; // 乗換待ち
+    leg.depTime = cur;
+    leg.arrTime = cur + leg.min + leg.delay;
+    cur = leg.arrTime;
+  });
+  return cur - dep;
+}
+
+function scheduleRoute(r, baseMin, timeType) {
+  const dur = computeTimes(r, 0);
+  const dep = timeType === 'arr' ? baseMin - dur : baseMin;
+  r.total = computeTimes(r, dep);
+  r.dep = dep;
+  r.arr = dep + r.total;
+}
+
+function assignBadges(routes) {
+  if (!routes.length) return;
+  const minTotal = Math.min(...routes.map(r => r.total));
+  const minFare = Math.min(...routes.map(r => r.fare.ic));
+  const minTr = Math.min(...routes.map(r => r.transfers));
+  for (const r of routes) {
+    r.badges = [];
+    if (r.total === minTotal) r.badges.push(['fast', '早']);
+    if (r.fare.ic === minFare) r.badges.push(['cheap', '安']);
+    if (r.transfers === minTr) r.badges.push(['easy', '楽']);
+  }
+}
+
+function searchTrainRoutes(points, baseMin, timeType, passId) {
+  const suspended = new Set(suspendedLineIds());
+  const adj = buildAdj(suspended);
+  const pass = PASSES.find(p => p.id === passId) || PASSES[0];
+  const cfgs = [
+    { tp: 5 },
+    { tp: 25 },
+    { tp: 5, kmW: id => (lineById(id).operator === 'JR' ? 1.0 : 0.8) * 0.35 },
+    { tp: 5, kmW: id => lineById(id).operator === 'JR' ? 0 : 1.5 },  // JR優先
+    { tp: 5, kmW: id => lineById(id).operator === 'JR' ? 1.5 : 0 }   // 私鉄優先
+  ];
+  if (pass.covers.length) {
+    cfgs.unshift({ tp: 5, kmW: id => pass.covers.includes(lineById(id).operator) ? 0 : 2.0, passPriority: true });
+  }
+  const dmap = delayMap();
+  const seen = new Set();
+  const routes = [];
+  for (const cfg of cfgs) {
+    const legs = routeWithVias(points, cfg, adj);
+    if (!legs || !legs.length) continue;
+    const sig = legs.map(l => l.lineId + ':' + l.stations[0] + '>' + l.stations[l.stations.length - 1]).join('|');
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    routes.push(buildRoute(legs, sig, dmap, passId, cfg.passPriority));
+  }
+  for (const r of routes) scheduleRoute(r, baseMin, timeType);
+  routes.sort((a, b) => (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) || a.arr - b.arr);
+  assignBadges(routes);
+  return routes;
+}
+
+function legDirection(leg) {
+  const line = lineById(leg.lineId);
+  const n = line.stations.length;
+  const i0 = line.stations.indexOf(leg.stations[0]);
+  if (line.loop) {
+    return line.stations[(i0 + 1) % n] === leg.stations[1] ? '外回り' : '内回り';
+  }
+  const i1 = line.stations.indexOf(leg.stations[1]);
+  return (i1 > i0 ? line.stations[n - 1] : line.stations[0]) + '行';
+}
+
+/* ================= 自転車・徒歩 ================= */
+function searchPathRoute(points, mode, baseMin, timeType) {
+  let km = 0;
+  for (let i = 0; i < points.length - 1; i++) km += haversine(STATIONS[points[i]], STATIONS[points[i + 1]]);
+  km *= 1.25; // 実道路換算の概算係数
+  const speed = mode === 'bike' ? 15 : 4.8;
+  const min = Math.max(1, Math.round(km / speed * 60));
+  const kcal = Math.round(km * (mode === 'bike' ? 25 : 50));
+  const dep = timeType === 'arr' ? baseMin - min : baseMin;
+  return { points, mode, km, min, kcal, dep, arr: dep + min };
+}
+
+/* ================= Googleマップ連携 ================= */
+function gmapsUrl(points, mode) {
+  const enc = n => encodeURIComponent(n + '駅');
+  if (mode === 'train') {
+    // transitモードは経由地パラメータ非対応のため、経由地ありはマルチストップ形式で開く
+    if (points.length > 2) return 'https://www.google.com/maps/dir/' + points.map(enc).join('/');
+    return `https://www.google.com/maps/dir/?api=1&origin=${enc(points[0])}&destination=${enc(points[points.length - 1])}&travelmode=transit`;
+  }
+  const tm = mode === 'bike' ? 'bicycling' : 'walking';
+  let url = `https://www.google.com/maps/dir/?api=1&origin=${enc(points[0])}&destination=${enc(points[points.length - 1])}&travelmode=${tm}`;
+  const vias = points.slice(1, -1);
+  if (vias.length) url += '&waypoints=' + vias.map(enc).join('%7C');
+  return url;
+}
+function openGmaps() {
+  if (!state.lastSearch) { toast('先にルート検索をしてください'); return; }
+  window.open(gmapsUrl(state.lastSearch.points, state.lastSearch.mode), '_blank', 'noopener');
+}
+
+/* ================= 画面遷移 ================= */
+function switchTab(name) {
+  $$('.tab-page').forEach(p => p.classList.toggle('active', p.id === 'tab-' + name));
+  $$('.tab-btn').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  if (name === 'map') {
+    ensureMap();
+    setTimeout(() => map.invalidateSize(), 60);
+  }
+  updateHeader();
+}
+function currentTab() {
+  return $$('.tab-btn').find(b => b.classList.contains('on')).dataset.tab;
+}
+function showScreen(name) {
+  $$('#tab-nav .screen').forEach(s => s.classList.toggle('active', s.id === 'screen-' + name));
+  updateHeader();
+}
+function currentScreen() {
+  const s = $$('#tab-nav .screen').find(x => x.classList.contains('active'));
+  return s ? s.id.replace('screen-', '') : 'search';
+}
+function updateHeader() {
+  const tab = currentTab();
+  const back = $('#header-back'), action = $('#header-action'), text = $('#header-text');
+  back.classList.add('hidden');
+  action.classList.add('hidden');
+  if (tab === 'nav') {
+    const sc = currentScreen();
+    if (sc === 'search') text.textContent = 'のりかえNavi';
+    else if (sc === 'results') {
+      text.textContent = '検索結果';
+      back.classList.remove('hidden');
+      action.classList.remove('hidden');
+    } else {
+      text.textContent = 'ルート詳細';
+      back.classList.remove('hidden');
+    }
+  } else {
+    text.textContent = { map: '地図', delay: '遅延情報', menu: 'メニュー' }[tab];
+  }
+}
+
+/* ================= 経由地UI ================= */
+const MAX_VIAS = 8;
+function addViaRow(value = '') {
+  const cont = $('#via-container');
+  if (cont.children.length >= MAX_VIAS) { toast(`経由地は最大${MAX_VIAS}件までです`); return; }
+  const row = document.createElement('div');
+  row.className = 'point-row';
+  row.dataset.kind = 'via';
+  row.innerHTML = `
+    <span class="point-dot dot-via"></span>
+    <input type="text" class="point-input via-input" placeholder="経由地(駅名)" autocomplete="off" value="${esc(value)}">
+    <button class="via-remove" aria-label="経由地を削除">×</button>`;
+  row.querySelector('.via-remove').addEventListener('click', () => { row.remove(); hideSuggest(); });
+  cont.appendChild(row);
+  row.querySelector('input').focus();
+}
+
+/* ================= 駅名サジェスト ================= */
+const POPULAR = ['新宿', '東京', '渋谷', '横浜', '町田', '八王子', '吉祥寺', '品川'];
+let activeInput = null;
+
+function showSuggest(input) {
+  activeInput = input;
+  const q = input.value.trim();
+  let names = q
+    ? Object.keys(STATIONS).filter(n => n.includes(q))
+    : POPULAR;
+  names = names.slice(0, 8);
+  const box = $('#suggest-box');
+  if (!names.length) { hideSuggest(); return; }
+  box.innerHTML = names.map(n => `
+    <div class="suggest-item" data-name="${esc(n)}">
+      <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 2a7 7 0 00-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 00-7-7zm0 9.5A2.5 2.5 0 1112 6.5a2.5 2.5 0 010 5z" fill="#8fa093"/></svg>
+      <span>${esc(n)}</span>
+      <span class="st-lines">${(STATION_LINES[n] || []).map(l => `<i class="line-dot" style="background:${l.color}"></i>`).join('')}</span>
+    </div>`).join('');
+  const card = $('.search-card');
+  const cr = card.getBoundingClientRect();
+  const ir = input.getBoundingClientRect();
+  box.style.top = (ir.bottom - cr.top + 4) + 'px';
+  box.classList.remove('hidden');
+}
+function hideSuggest() {
+  $('#suggest-box').classList.add('hidden');
+  activeInput = null;
+}
+
+/* ================= 検索実行 ================= */
+function collectPoints() {
+  const names = [
+    $('#input-origin').value.trim(),
+    ...$$('.via-input').map(i => i.value.trim()).filter(Boolean),
+    $('#input-dest').value.trim()
+  ];
+  if (!names[0] || !names[names.length - 1]) { toast('出発地と目的地を入力してください'); return null; }
+  for (const n of names) {
+    if (!STATIONS[n]) { toast(`「${n}」はサンプルデータにありません。候補から選択してください`); return null; }
+  }
+  const points = names.filter((n, i) => i === 0 || n !== names[i - 1]); // 連続重複を除去
+  if (points.length < 2) { toast('出発地と目的地が同じです'); return null; }
+  return points;
+}
+
+function baseMinutes() {
+  const t = $('#input-time').value;
+  if (!t) { const d = new Date(); return d.getHours() * 60 + d.getMinutes(); }
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function doSearch() {
+  hideSuggest();
+  const points = collectPoints();
+  if (!points) return;
+  const baseMin = baseMinutes();
+  const dateStr = $('#input-date').value;
+  state.lastSearch = { points, mode: state.mode, baseMin, timeType: state.timeType, dateStr };
+
+  if (state.mode === 'train') {
+    const routes = searchTrainRoutes(points, baseMin, state.timeType, store.pass);
+    if (!routes.length) { toast('経路が見つかりませんでした(運転見合わせ路線を確認してください)'); return; }
+    state.routes = routes;
+    state.pathResult = null;
+    renderResults();
+  } else {
+    state.pathResult = searchPathRoute(points, state.mode, baseMin, state.timeType);
+    state.routes = [];
+    renderResults();
+  }
+  showScreen('results');
+}
+
+/* ================= 結果描画 ================= */
+function fmtDateLabel(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr + 'T00:00:00');
+  if (isNaN(d)) return '';
+  const w = '日月火水木金土'[d.getDay()];
+  return `${d.getMonth() + 1}月${d.getDate()}日(${w})`;
+}
+
+function renderResults() {
+  const { points, mode, baseMin, timeType, dateStr } = state.lastSearch;
+  $('#results-summary').textContent =
+    `${points.join(' → ')} ・ ${fmtDateLabel(dateStr)} ${fmtTime(baseMin)}${timeType === 'dep' ? '出発' : '到着'}`;
+
+  const bannerEl = $('#results-banner');
+  const banners = [];
+  const suspended = suspendedLineIds();
+  if (suspended.length) {
+    banners.push(`<div class="banner warn">${warnSvg()}<span>${suspended.map(id => esc(lineById(id).name)).join('・')}は運転見合わせのため検索から除外しています</span></div>`);
+  }
+  const activeDelays = store.delays.filter(d => d.min !== 'suspend');
+  if (mode === 'train' && activeDelays.length) {
+    banners.push(`<div class="banner warn">${warnSvg()}<span>ユーザー登録の遅延情報 ${activeDelays.length}件を所要時間に反映しています</span></div>`);
+  }
+  if (mode === 'train' && !banners.length) {
+    banners.push(`<div class="banner info">${infoSvg()}<span>運賃は通常運賃を表示しています(きっぷ/IC)</span></div>`);
+  }
+  bannerEl.innerHTML = banners.join('');
+
+  const list = $('#results-list');
+  if (mode !== 'train') { renderPathCard(list); return; }
+
+  const congestionLabel = ['空いています', '普通', '混雑'];
+  list.innerHTML = state.routes.map((r, idx) => {
+    const tags = [];
+    if (r.passName && r.legs.some(l => l.passFree)) tags.push(`<span class="tag pass">${esc(r.passName)}</span>`);
+    for (const [cls, label] of r.badges) tags.push(`<span class="tag ${cls}">${label}</span>`);
+    if (r.delayTotal) tags.push(`<span class="tag delay">遅延 +${r.delayTotal}分</span>`);
+    const chips = r.legs.map(l => {
+      const line = lineById(l.lineId);
+      return `<span class="route-line-chip"><i style="background:${line.color}"></i>${esc(line.short)}</span>`;
+    }).join('<span style="color:#b9c6ba;font-weight:800">›</span>');
+    return `
+    <div class="route-card" data-idx="${idx}">
+      <div class="route-tags">${tags.join('')}</div>
+      <div class="route-time-row">
+        <span class="route-time">${fmtTime(r.dep)}</span>
+        <span class="route-arrow">→</span>
+        <span class="route-time arr">${fmtTime(r.arr)}</span>
+      </div>
+      <div class="route-meta">
+        <span>所要 ${fmtDur(r.total)}</span>
+        <span>乗換 ${r.transfers}回</span>
+        <span class="congestion c${r.congestion}">${congestionLabel[r.congestion]}</span>
+        <span class="route-fare">${r.fare.ticket === 0 ? '¥0(パス適用)' : 'IC ' + yen(r.fare.ic)}</span>
+      </div>
+      <div class="route-lines">${chips}</div>
+      <span class="chev">›</span>
+    </div>`;
+  }).join('');
+
+  $$('#results-list .route-card').forEach(card => {
+    card.addEventListener('click', () => {
+      state.current = state.routes[Number(card.dataset.idx)];
+      renderDetail();
+      showScreen('detail');
+    });
+  });
+}
+
+function renderPathCard(list) {
+  const p = state.pathResult;
+  const label = p.mode === 'bike' ? '自転車' : '徒歩';
+  list.innerHTML = `
+    <div class="route-card" style="cursor:default">
+      <div class="route-tags"><span class="tag easy">${label}ルート</span></div>
+      <div class="route-time-row">
+        <span class="route-time">${fmtTime(p.dep)}</span>
+        <span class="route-arrow">→</span>
+        <span class="route-time arr">${fmtTime(p.arr)}</span>
+      </div>
+      <div class="route-meta">
+        <span>所要 ${fmtDur(p.min)}</span>
+        <span>約${p.km.toFixed(1)}km</span>
+        <span>消費 約${p.kcal}kcal</span>
+        <span class="route-fare">¥0</span>
+      </div>
+      <div class="route-lines">
+        ${p.points.map(esc).join(' <span style="color:#b9c6ba;font-weight:800">›</span> ')}
+      </div>
+      <div class="detail-actions" style="margin-top:12px">
+        <button class="secondary-btn" id="btn-path-map">地図で確認</button>
+        <button class="gmap-btn" id="btn-path-gmap">Googleマップで開く</button>
+      </div>
+      <p class="demo-note" style="margin-top:8px">※距離・時間は直線距離×1.25の概算です。実際のルートはGoogleマップでご確認ください。</p>
+    </div>`;
+  $('#btn-path-map').addEventListener('click', () => { switchTab('map'); showPathOnMap(p); });
+  $('#btn-path-gmap').addEventListener('click', openGmaps);
+}
+
+/* ================= 詳細描画 ================= */
+function warnSvg() {
+  return '<svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 3L2 20h20L12 3zm0 6v5m0 3v.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+}
+function infoSvg() {
+  return '<svg viewBox="0 0 24 24" width="15" height="15"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 8v.5M12 11v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+}
+
+function renderDetail() {
+  const r = state.current;
+  const { points } = state.lastSearch;
+  const vias = new Set(points.slice(1, -1));
+
+  $('#detail-head').innerHTML = `
+    <div class="detail-sum-card">
+      <div class="detail-sum-time">${fmtTime(r.dep)} → ${fmtTime(r.arr)}</div>
+      <div class="detail-sum-meta">
+        <span>所要 <b>${fmtDur(r.total)}</b></span>
+        <span>乗換 <b>${r.transfers}</b>回</span>
+        <span>${r.fare.ticket === 0 ? 'フリーパス適用 ¥0' : 'IC <b>' + yen(r.fare.ic) + '</b>'}</span>
+      </div>
+    </div>`;
+
+  const rows = [];
+  r.legs.forEach((leg, i) => {
+    const line = lineById(leg.lineId);
+    const first = i === 0;
+    const stName = leg.stations[0];
+    const cls = first ? 'origin' : (vias.has(stName) ? 'via' : '');
+    if (first) {
+      rows.push(stationRow(stName, cls, `${fmtTime(leg.depTime)}`, '発'));
+    } else {
+      const prevArr = r.legs[i - 1].arrTime;
+      rows.push(stationRow(stName, cls, fmtTime(prevArr), `発 ${fmtTime(leg.depTime)}`, vias.has(stName)));
+    }
+    const platform = (hashStr(leg.lineId + leg.stations[0]) % 11) + 1;
+    const delayHtml = leg.delayInfo ? `
+      <div class="leg-delay">${warnSvg()}
+        <span>${esc(leg.delayInfo.reason)}の影響により約${leg.delay}分の遅延
+        ${leg.delayInfo.comment ? '<br>「' + esc(leg.delayInfo.comment) + '」' : ''}
+        <br><small>ユーザー登録 ${new Date(leg.delayInfo.ts).getMonth() + 1}/${new Date(leg.delayInfo.ts).getDate()} ${fmtTime(new Date(leg.delayInfo.ts).getHours() * 60 + new Date(leg.delayInfo.ts).getMinutes())}</small></span>
+      </div>` : '';
+    rows.push(`
+      <div class="tl-leg">
+        <div class="tl-leg-rail" style="background:${line.color}"></div>
+        <div class="tl-leg-body">
+          ${leg.passFree && r.passName ? `<div class="leg-badges"><span class="tag pass">${esc(r.passName)}</span></div>` : ''}
+          <div class="leg-line-name" style="color:${line.color}">${esc(line.name)}</div>
+          <div class="leg-sub">${esc(legDirection(leg))} ・ ${leg.stations.length - 1}駅 ・ ${leg.min + leg.delay}分 ・ [発]${platform}番線</div>
+          ${delayHtml}
+        </div>
+      </div>`);
+  });
+  const lastLeg = r.legs[r.legs.length - 1];
+  rows.push(stationRow(lastLeg.stations[lastLeg.stations.length - 1], 'dest', fmtTime(lastLeg.arrTime), '着'));
+
+  $('#detail-timeline').innerHTML = `
+    <div class="timeline">${rows.join('')}</div>
+    <div class="fare-box">
+      <span>きっぷ <b>${yen(r.fare.ticket)}</b></span>
+      <span>IC <b>${yen(r.fare.ic)}</b></span>
+      ${r.fare.passApplied ? '<span style="color:var(--green);font-weight:800">フリーパス適用区間あり</span>' : ''}
+    </div>`;
+}
+
+function stationRow(name, cls, time, sub, isVia) {
+  return `
+    <div class="tl-station ${cls || ''}">
+      <div class="tl-time">${time}<small>${esc(sub)}</small></div>
+      <div class="tl-node"></div>
+      <div class="tl-name">${esc(name)}${isVia ? '<small>経由</small>' : ''}</div>
+    </div>`;
+}
+
+/* ================= 地図(Leaflet) ================= */
+let map = null, routeGroup = null;
+
+function ensureMap() {
+  if (map) return;
+  map = L.map('map', { zoomControl: false }).setView([35.62, 139.55], 10);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    maxZoom: 19
+  }).addTo(map);
+  for (const line of LINES) {
+    const pts = line.stations.map(n => [STATIONS[n].lat, STATIONS[n].lng]);
+    if (line.loop) pts.push(pts[0]);
+    L.polyline(pts, { color: line.color, weight: 2.5, opacity: 0.35 }).addTo(map);
+  }
+  routeGroup = L.layerGroup().addTo(map);
+}
+
+function marker(name, color, big) {
+  const m = L.circleMarker([STATIONS[name].lat, STATIONS[name].lng], {
+    radius: big ? 9 : 5, color: '#fff', weight: 2.5, fillColor: color, fillOpacity: 1
+  });
+  m.bindTooltip(name, big
+    ? { permanent: true, direction: 'top', className: 'map-label', offset: [0, -8] }
+    : { direction: 'top', className: 'map-label' });
+  return m;
+}
+
+function showRouteOnMap(route) {
+  ensureMap();
+  routeGroup.clearLayers();
+  const all = [];
+  for (const leg of route.legs) {
+    const line = lineById(leg.lineId);
+    const pts = leg.stations.map(n => [STATIONS[n].lat, STATIONS[n].lng]);
+    all.push(...pts);
+    L.polyline(pts, { color: '#fff', weight: 9, opacity: .9 }).addTo(routeGroup);
+    L.polyline(pts, { color: line.color, weight: 5, opacity: 1 }).addTo(routeGroup);
+  }
+  const { points } = state.lastSearch;
+  const vias = points.slice(1, -1);
+  route.legs.forEach((leg, i) => { if (i > 0) marker(leg.stations[0], '#fff', false).setStyle({ fillColor: '#15241c' }).addTo(routeGroup); });
+  for (const v of vias) marker(v, '#e8780a', true).addTo(routeGroup);
+  marker(points[0], '#067a46', true).addTo(routeGroup);
+  marker(points[points.length - 1], '#d92638', true).addTo(routeGroup);
+  fitMap(L.latLngBounds(all));
+  $('#map-route-info').innerHTML =
+    `${esc(points[0])} → ${esc(points[points.length - 1])} ・ ${fmtTime(route.dep)}発 ・ ${fmtDur(route.total)} ・ ${route.fare.ticket === 0 ? '¥0(パス適用)' : 'IC ' + yen(route.fare.ic)}`;
+  $('#map-route-info').classList.remove('hidden');
+  $('#btn-gmap-map').classList.remove('hidden');
+}
+
+// タブ切替直後はコンテナサイズが未確定のため、確定後に再フィット
+function fitMap(bounds) {
+  map.fitBounds(bounds, { padding: [40, 40] });
+  setTimeout(() => {
+    map.invalidateSize();
+    map.fitBounds(bounds, { padding: [40, 40] });
+  }, 150);
+}
+
+function showPathOnMap(p) {
+  ensureMap();
+  routeGroup.clearLayers();
+  const pts = p.points.map(n => [STATIONS[n].lat, STATIONS[n].lng]);
+  L.polyline(pts, { color: '#fff', weight: 9, opacity: .9 }).addTo(routeGroup);
+  L.polyline(pts, { color: '#1668b3', weight: 5, dashArray: '10 7' }).addTo(routeGroup);
+  p.points.slice(1, -1).forEach(v => marker(v, '#e8780a', true).addTo(routeGroup));
+  marker(p.points[0], '#067a46', true).addTo(routeGroup);
+  marker(p.points[p.points.length - 1], '#d92638', true).addTo(routeGroup);
+  fitMap(L.latLngBounds(pts));
+  $('#map-route-info').innerHTML =
+    `${p.mode === 'bike' ? '自転車' : '徒歩'}: ${esc(p.points[0])} → ${esc(p.points[p.points.length - 1])} ・ 約${p.km.toFixed(1)}km ・ ${fmtDur(p.min)}`;
+  $('#map-route-info').classList.remove('hidden');
+  $('#btn-gmap-map').classList.remove('hidden');
+}
+
+/* ================= 遅延情報 ================= */
+function renderDelays() {
+  const delays = store.delays;
+  const list = $('#delay-list');
+  if (!delays.length) {
+    list.innerHTML = '<div class="empty-note">登録されている遅延情報はありません。<br>上のフォームから登録すると、経路検索に反映されます。</div>';
+  } else {
+    list.innerHTML = delays.slice().sort((a, b) => b.ts - a.ts).map(d => {
+      const line = lineById(d.lineId);
+      const dt = new Date(d.ts);
+      return `
+      <div class="delay-item ${d.min === 'suspend' ? 'suspend' : ''}">
+        <div class="delay-item-body">
+          <div class="delay-item-line"><i style="background:${line.color}"></i>${esc(line.name)}</div>
+          <div class="delay-item-status">${d.min === 'suspend' ? '運転見合わせ' : `約${d.min}分の遅延`} ・ ${esc(d.reason)}</div>
+          <div class="delay-item-sub">${d.comment ? esc(d.comment) + '<br>' : ''}${dt.getMonth() + 1}/${dt.getDate()} ${fmtTime(dt.getHours() * 60 + dt.getMinutes())} 登録</div>
+        </div>
+        <button class="delay-del" data-id="${d.id}">削除</button>
+      </div>`;
+    }).join('');
+    $$('#delay-list .delay-del').forEach(b => b.addEventListener('click', () => {
+      store.delays = store.delays.filter(x => String(x.id) !== b.dataset.id);
+      renderDelays();
+      toast('遅延情報を削除しました');
+    }));
+  }
+  const badge = $('#delay-tab-badge');
+  badge.classList.toggle('hidden', !delays.length);
+  badge.textContent = delays.length;
+
+  const home = $('#delay-notice-home');
+  home.innerHTML = delays.length
+    ? `<div class="banner warn" style="cursor:pointer" id="home-delay-banner">${warnSvg()}<span>遅延情報 ${delays.length}件が登録されています(検索結果に反映されます)</span></div>`
+    : '';
+  if (delays.length) $('#home-delay-banner').addEventListener('click', () => switchTab('delay'));
+}
+
+function addDelay() {
+  const lineId = $('#delay-line').value;
+  const min = $('#delay-min').value;
+  const reason = $('#delay-reason').value;
+  const comment = $('#delay-comment').value.trim();
+  const delays = store.delays.filter(d => d.lineId !== lineId); // 同一路線は上書き
+  delays.push({ id: Date.now(), lineId, min, reason, comment, ts: Date.now() });
+  store.delays = delays;
+  $('#delay-comment').value = '';
+  renderDelays();
+  const line = lineById(lineId);
+  toast(`${line.name}の${min === 'suspend' ? '運転見合わせ' : '遅延情報'}を登録しました`);
+}
+
+/* ================= フリーパス ================= */
+function renderPassUI() {
+  const cur = store.pass;
+  const pass = PASSES.find(p => p.id === cur) || PASSES[0];
+  const label = $('#pass-label');
+  label.textContent = pass.id === 'none' ? 'フリーパスなし' : pass.name;
+  label.classList.toggle('pass-on', pass.id !== 'none');
+  $('#menu-pass-label').textContent = pass.id === 'none' ? 'なし' : pass.name;
+
+  $('#pass-list').innerHTML = PASSES.map(p => `
+    <button class="pass-item ${p.id === cur ? 'selected' : ''} ${p.id !== 'none' && !p.covers.length ? 'outside' : ''}" data-id="${p.id}">
+      <span class="pass-check">${p.id === cur ? '✓' : ''}</span>
+      <span class="pass-body">${esc(p.name)}${p.note ? `<span class="pass-note">${esc(p.note)}</span>` : ''}</span>
+    </button>`).join('');
+  $$('#pass-list .pass-item').forEach(b => b.addEventListener('click', () => {
+    store.pass = b.dataset.id;
+    const p = PASSES.find(x => x.id === b.dataset.id);
+    if (p.id !== 'none' && !p.covers.length) toast('このパスはデモエリア外のため運賃計算には影響しません');
+    renderPassUI();
+  }));
+}
+
+/* ================= 初期化 ================= */
+function init() {
+  // 日時デフォルト
+  const now = new Date();
+  $('#input-date').value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const rounded = Math.ceil((now.getHours() * 60 + now.getMinutes()) / 5) * 5;
+  $('#input-time').value = fmtTime(rounded);
+
+  // 遅延フォームの選択肢
+  $('#delay-line').innerHTML = LINES.map(l => `<option value="${l.id}">${esc(l.name)}</option>`).join('');
+  $('#delay-reason').innerHTML = DELAY_REASONS.map(r => `<option>${esc(r)}</option>`).join('');
+
+  // タブ
+  $$('.tab-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+  // ヘッダー
+  $('#header-back').addEventListener('click', () => {
+    showScreen(currentScreen() === 'detail' ? 'results' : 'search');
+  });
+  $('#header-action').addEventListener('click', () => showScreen('search'));
+
+  // 検索フォーム
+  $('#btn-add-via').addEventListener('click', () => addViaRow());
+  $('#btn-swap').addEventListener('click', () => {
+    const o = $('#input-origin'), d = $('#input-dest');
+    [o.value, d.value] = [d.value, o.value];
+    const vias = $$('.via-input').map(i => i.value);
+    $$('.via-input').forEach((i, idx) => { i.value = vias[vias.length - 1 - idx]; });
+  });
+  $('#seg-timetype').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    state.timeType = b.dataset.v;
+    $$('#seg-timetype button').forEach(x => x.classList.toggle('on', x === b));
+  });
+  $('#mode-row').addEventListener('click', e => {
+    const b = e.target.closest('.mode-btn');
+    if (!b) return;
+    state.mode = b.dataset.mode;
+    $$('.mode-btn').forEach(x => x.classList.toggle('on', x === b));
+  });
+  $('#btn-search').addEventListener('click', doSearch);
+
+  // サジェスト(イベント委譲)
+  document.addEventListener('focusin', e => {
+    if (e.target.classList && e.target.classList.contains('point-input')) showSuggest(e.target);
+  });
+  document.addEventListener('input', e => {
+    if (e.target.classList && e.target.classList.contains('point-input')) showSuggest(e.target);
+  });
+  $('#suggest-box').addEventListener('mousedown', e => {
+    const item = e.target.closest('.suggest-item');
+    if (!item || !activeInput) return;
+    e.preventDefault();
+    activeInput.value = item.dataset.name;
+    hideSuggest();
+  });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.suggest-item') && !e.target.closest('.point-input')) hideSuggest();
+  });
+
+  // 詳細画面アクション
+  $('#btn-show-map').addEventListener('click', () => {
+    if (!state.current) return;
+    switchTab('map');
+    showRouteOnMap(state.current);
+  });
+  $('#btn-gmap-detail').addEventListener('click', openGmaps);
+  $('#btn-gmap-map').addEventListener('click', openGmaps);
+
+  // 遅延
+  $('#btn-delay-add').addEventListener('click', addDelay);
+
+  // フリーパスモーダル
+  $('#btn-pass').addEventListener('click', () => $('#pass-modal').classList.remove('hidden'));
+  $('#menu-pass').addEventListener('click', () => $('#pass-modal').classList.remove('hidden'));
+  $('#pass-done').addEventListener('click', () => $('#pass-modal').classList.add('hidden'));
+  $('#pass-modal').addEventListener('click', e => {
+    if (e.target.id === 'pass-modal') $('#pass-modal').classList.add('hidden');
+  });
+
+  // メニュー
+  $('#menu-clear-delays').addEventListener('click', () => {
+    store.delays = [];
+    renderDelays();
+    toast('遅延情報をすべて削除しました');
+  });
+  $('#menu-reset').addEventListener('click', () => {
+    localStorage.removeItem('nn_delays');
+    localStorage.removeItem('nn_pass');
+    location.reload();
+  });
+
+  renderDelays();
+  renderPassUI();
+  updateHeader();
+
+  // デモ用の初期値
+  $('#input-origin').value = '新宿';
+  $('#input-dest').value = '町田';
+
+  // PWA
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+}
+
+document.addEventListener('DOMContentLoaded', init);

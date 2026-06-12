@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#04532f">
+<title>のりかえNavi - 乗換案内デモ</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700;900&family=Sora:wght@500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ヘッダー -->
+  <header id="app-header">
+    <button id="header-back" class="header-btn hidden" aria-label="戻る">
+      <svg viewBox="0 0 24 24" width="22" height="22"><path d="M15 4l-8 8 8 8" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <div id="header-title">
+      <span class="logo-mark">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 2c-4 0-7 .6-7 4v9c0 1.7 1.3 3 3 3l-1.5 2v1h2l1.5-2h4l1.5 2h2v-1L16 18c1.7 0 3-1.3 3-3V6c0-3.4-3-4-7-4zM7.5 15.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm9 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zM17 10H7V6h10v4z" fill="currentColor"/></svg>
+      </span>
+      <span id="header-text">のりかえNavi</span>
+    </div>
+    <button id="header-action" class="header-btn hidden">時間変更</button>
+  </header>
+
+  <main id="main">
+
+    <!-- ========== ナビタブ(検索 → 結果 → 詳細) ========== -->
+    <section id="tab-nav" class="tab-page active">
+
+      <!-- 検索画面 -->
+      <div id="screen-search" class="screen active">
+        <div id="delay-notice-home"></div>
+
+        <div class="card search-card">
+          <div class="point-rows" id="point-rows">
+            <div class="point-row" data-kind="origin">
+              <span class="point-dot dot-origin"></span>
+              <input type="text" id="input-origin" class="point-input" placeholder="出発地(駅名)" autocomplete="off">
+            </div>
+            <div id="via-container"></div>
+            <div class="point-row" data-kind="dest">
+              <span class="point-dot dot-dest"></span>
+              <input type="text" id="input-dest" class="point-input" placeholder="目的地(駅名)" autocomplete="off">
+            </div>
+          </div>
+          <div class="point-tools">
+            <button id="btn-add-via" class="tool-btn">
+              <svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" fill="none"/></svg>
+              経由地を追加
+            </button>
+            <button id="btn-swap" class="tool-btn">
+              <svg viewBox="0 0 24 24" width="15" height="15"><path d="M7 4v13m0 0l-3-3m3 3l3-3M17 20V7m0 0l-3 3m3-3l3 3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+              入替
+            </button>
+          </div>
+          <div id="suggest-box" class="hidden"></div>
+        </div>
+
+        <div class="card option-card">
+          <div class="row-label">日時</div>
+          <div class="datetime-row">
+            <input type="date" id="input-date">
+            <input type="time" id="input-time">
+            <div class="seg" id="seg-timetype">
+              <button data-v="dep" class="on">出発</button>
+              <button data-v="arr">到着</button>
+            </div>
+          </div>
+
+          <div class="row-label">移動手段</div>
+          <div class="mode-row" id="mode-row">
+            <button class="mode-btn on" data-mode="train">
+              <svg viewBox="0 0 24 24" width="24" height="24"><path d="M12 2c-4 0-7 .6-7 4v9c0 1.7 1.3 3 3 3l-1.5 2v1h2l1.5-2h4l1.5 2h2v-1L16 18c1.7 0 3-1.3 3-3V6c0-3.4-3-4-7-4zM7.5 15.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm9 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zM17 10H7V6h10v4z" fill="currentColor"/></svg>
+              <span>電車</span>
+            </button>
+            <button class="mode-btn" data-mode="bike">
+              <svg viewBox="0 0 24 24" width="24" height="24"><path d="M5.5 17.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7zm13 0a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 14L9 7h2m-2 0h4.5l3 7M15 4.5h2L18.5 14M9.5 9.5l3 4.5h2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>自転車</span>
+            </button>
+            <button class="mode-btn" data-mode="walk">
+              <svg viewBox="0 0 24 24" width="24" height="24"><circle cx="13" cy="4" r="2" fill="currentColor"/><path d="M13 7l-3 5 2 3v6m-2-6l-3 5m6-10l2 2h3M10 12l-1-4 4-1" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span>徒歩</span>
+            </button>
+          </div>
+
+          <div class="row-label">フリーパス <span class="new-badge">NEW</span></div>
+          <button id="btn-pass" class="pass-select-btn">
+            <span id="pass-label">フリーパスなし</span>
+            <svg viewBox="0 0 24 24" width="16" height="16"><path d="M8 5l8 7-8 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+
+        <button id="btn-search" class="primary-btn">
+          <svg viewBox="0 0 24 24" width="19" height="19"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.4"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>
+          ルート検索
+        </button>
+
+        <p class="demo-note">※デモアプリです。時刻・運賃はサンプルデータによる概算で、実際の運行情報とは異なります。</p>
+      </div>
+
+      <!-- 検索結果画面 -->
+      <div id="screen-results" class="screen">
+        <div id="results-banner"></div>
+        <div id="results-summary" class="results-summary"></div>
+        <div id="results-list"></div>
+      </div>
+
+      <!-- ルート詳細画面 -->
+      <div id="screen-detail" class="screen">
+        <div id="detail-head"></div>
+        <div id="detail-timeline"></div>
+        <div class="detail-actions">
+          <button id="btn-show-map" class="secondary-btn">
+            <svg viewBox="0 0 24 24" width="17" height="17"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zm0 0v14m6-12v14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg>
+            地図で確認
+          </button>
+          <button id="btn-gmap-detail" class="gmap-btn">
+            <svg viewBox="0 0 24 24" width="17" height="17"><path d="M12 2a7 7 0 00-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 00-7-7zm0 9.5A2.5 2.5 0 1112 6.5a2.5 2.5 0 010 5z" fill="currentColor"/></svg>
+            Googleマップで開く
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 地図タブ ========== -->
+    <section id="tab-map" class="tab-page">
+      <div id="map"></div>
+      <div id="map-overlay">
+        <div id="map-route-info" class="hidden"></div>
+        <button id="btn-gmap-map" class="gmap-btn hidden">
+          <svg viewBox="0 0 24 24" width="17" height="17"><path d="M12 2a7 7 0 00-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 00-7-7zm0 9.5A2.5 2.5 0 1112 6.5a2.5 2.5 0 010 5z" fill="currentColor"/></svg>
+          Googleマップで開く
+        </button>
+      </div>
+    </section>
+
+    <!-- ========== 遅延情報タブ ========== -->
+    <section id="tab-delay" class="tab-page">
+      <div class="card delay-form-card">
+        <h2 class="card-title">
+          <svg viewBox="0 0 24 24" width="19" height="19"><path d="M12 3L2 20h20L12 3zm0 6v5m0 3v.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          遅延情報を登録
+        </h2>
+        <p class="card-sub">登録した遅延は経路検索の所要時間に反映されます(この端末のみ・拡張機能デモ)</p>
+        <div class="form-grid">
+          <label>路線
+            <select id="delay-line"></select>
+          </label>
+          <label>状況
+            <select id="delay-min">
+              <option value="5">約5分の遅延</option>
+              <option value="10" selected>約10分の遅延</option>
+              <option value="15">約15分の遅延</option>
+              <option value="20">約20分の遅延</option>
+              <option value="30">約30分の遅延</option>
+              <option value="60">約60分の遅延</option>
+              <option value="suspend">運転見合わせ</option>
+            </select>
+          </label>
+          <label>理由
+            <select id="delay-reason"></select>
+          </label>
+          <label>メモ(任意)
+            <input type="text" id="delay-comment" placeholder="例: 新宿〜中野間で停車中" maxlength="60">
+          </label>
+        </div>
+        <button id="btn-delay-add" class="primary-btn small">登録する</button>
+      </div>
+      <div id="delay-list"></div>
+    </section>
+
+    <!-- ========== メニュータブ ========== -->
+    <section id="tab-menu" class="tab-page">
+      <div class="card menu-card">
+        <h2 class="card-title">メニュー</h2>
+        <button class="menu-item" id="menu-pass">
+          <span>フリーパス選択</span><span id="menu-pass-label" class="menu-value"></span>
+        </button>
+        <button class="menu-item" id="menu-clear-delays"><span>遅延情報をすべて削除</span></button>
+        <button class="menu-item" id="menu-reset"><span>データを初期化</span></button>
+      </div>
+      <div class="card menu-card">
+        <h2 class="card-title">アプリについて</h2>
+        <p class="about-text">
+          のりかえNavi は NAVITIME 風の乗換案内デモPWAです。<br>
+          ブラウザのメニューから「ホーム画面に追加」すると、アプリのように起動できます。<br><br>
+          <b>収録サンプル路線:</b><br>
+          JR山手線 / JR中央線快速 / JR横浜線 / JR東海道線 / 小田急小田原線 / 東急東横線<br><br>
+          時刻・運賃・遅延情報はすべてデモ用データであり、実際の運行情報ではありません。
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <!-- タブバー -->
+  <nav id="tabbar">
+    <button class="tab-btn on" data-tab="nav">
+      <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2.2"/><path d="M15.5 15.5L21 21" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <span>ナビ</span>
+    </button>
+    <button class="tab-btn" data-tab="map">
+      <svg viewBox="0 0 24 24"><path d="M9 4L3 6v14l6-2 6 2 6-2V4l-6 2-6-2zm0 0v14m6-12v14" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"/></svg>
+      <span>地図</span>
+    </button>
+    <button class="tab-btn" data-tab="delay">
+      <svg viewBox="0 0 24 24"><path d="M12 3L2 20h20L12 3zm0 6v5m0 3v.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>遅延情報</span>
+      <em id="delay-tab-badge" class="hidden"></em>
+    </button>
+    <button class="tab-btn" data-tab="menu">
+      <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      <span>メニュー</span>
+    </button>
+  </nav>
+
+  <!-- フリーパス選択モーダル -->
+  <div id="pass-modal" class="modal hidden">
+    <div class="modal-sheet">
+      <div class="modal-head">
+        <span>フリーパス選択</span>
+        <button id="pass-done">完了</button>
+      </div>
+      <div id="pass-list"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

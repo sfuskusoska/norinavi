@@ -1,0 +1,15 @@
+{
+  "name": "のりかえNavi - 乗換案内デモ",
+  "short_name": "のりかえNavi",
+  "description": "NAVITIME風の乗換案内デモPWA。遅延情報の登録、自転車モード、経由地検索、Googleマップ連携に対応。",
+  "lang": "ja",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef3ec",
+  "theme_color": "#04532f",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
