@@ -537,6 +537,14 @@ function shiftRoute(r, k) {
   return { ...r, legs, dep: r.dep + delta, arr: r.arr + delta, total: r.total, badges: [], isLater: true };
 }
 
+// 詳細画面で前/次の一本へ移行(運転間隔ぶん時刻をずらす)
+function stepRoute(dir) {
+  const v = shiftRoute(state.current, dir);
+  if (!v) { toast(dir > 0 ? 'これ以上後の便はありません(終電後)' : 'これ以上前の便はありません(始発前)'); return; }
+  state.current = v;
+  renderDetail();
+}
+
 function assignBadges(routes) {
   if (!routes.length) return;
   const minTotal = Math.min(...routes.map(r => r.total));
@@ -1253,6 +1261,11 @@ function renderDetail() {
 
   const headDep = r.legs[0].depTime;
   $('#detail-head').innerHTML = `
+    <div class="detail-step">
+      <button class="step-btn" id="step-prev">‹ 前の一本</button>
+      <span class="step-label">この経路</span>
+      <button class="step-btn" id="step-next">次の一本 ›</button>
+    </div>
     <div class="detail-sum-card">
       <div class="detail-sum-time">${fmtTime(headDep)} → ${fmtTime(r.arr)}</div>
       <div class="detail-sum-meta">
@@ -1261,6 +1274,8 @@ function renderDetail() {
         <span>${r.fare.ticket === 0 ? 'フリーパス適用 ¥0' : 'IC <b>' + yen(r.fare.ic) + '</b>'}</span>
       </div>
     </div>`;
+  $('#step-prev').addEventListener('click', () => stepRoute(-1));
+  $('#step-next').addEventListener('click', () => stepRoute(1));
 
   const rows = [];
   r.legs.forEach((leg, i) => {
@@ -1371,6 +1386,63 @@ async function locateOnMap() {
   const near = nearestStations(pt, 1, 9999)[0];
   if (btn) btn.classList.remove('loading');
   toast(near ? `現在地を表示(最寄り: ${near.name} 約${(near.km * 1.25).toFixed(1)}km)` : '現在地を表示しました');
+}
+
+/* ===== 地図に運行状況を色分け表示 ===== */
+let railStatusLayer = null;
+let railStatusOn = false;
+
+function lineStatus(lineId) {
+  const dmap = delayMap();
+  const d = dmap[lineId];
+  if (d && d.min === 'suspend') return { kind: 'suspend', label: '運転見合わせ', color: '#d0021b' };
+  if (d && Number(d.min) > 0) return { kind: 'delay', label: `遅延 +${d.min}分`, color: '#f5a623' };
+  return { kind: 'normal', label: '平常運転', color: null };
+}
+
+async function toggleRailStatus() {
+  railStatusOn = !railStatusOn;
+  $('#btn-rail-status').classList.toggle('on', railStatusOn);
+  if (!railStatusOn) {
+    if (railStatusLayer) { map.removeLayer(railStatusLayer); railStatusLayer = null; }
+    $('#rail-legend').classList.add('hidden');
+    return;
+  }
+  ensureMap();
+  toast('運行状況を取得中…');
+  await fetchLiveJRDelays().catch(() => {});
+  await loadFeedDelays().catch(() => {});
+  drawRailStatus();
+}
+
+function drawRailStatus() {
+  if (!railStatusOn) return;
+  ensureMap();
+  if (railStatusLayer) map.removeLayer(railStatusLayer);
+  railStatusLayer = L.layerGroup().addTo(map);
+  let nDelay = 0, nSuspend = 0;
+  for (const line of LINES) {
+    const st = lineStatus(line.id);
+    if (st.kind === 'normal') continue; // 異常のある路線のみ強調
+    const pts = line.stations.filter(n => STATIONS[n]).map(n => [STATIONS[n].lat, STATIONS[n].lng]);
+    if (line.loop && pts.length) pts.push(pts[0]);
+    const opts = st.kind === 'suspend'
+      ? { color: st.color, weight: 6, opacity: .95, dashArray: '10 8' }
+      : { color: st.color, weight: 6, opacity: .95 };
+    const pl = L.polyline(pts, opts).addTo(railStatusLayer);
+    pl.bindTooltip(`${line.name}: ${st.label}`, { sticky: true, className: 'map-label' });
+    if (st.kind === 'suspend') nSuspend++; else nDelay++;
+  }
+  const leg = $('#rail-legend');
+  leg.classList.remove('hidden');
+  if (!nDelay && !nSuspend) {
+    leg.innerHTML = '<span class="ok">✓ 収録路線に運休・遅延はありません(JRは実データ)</span>';
+  } else {
+    leg.innerHTML =
+      (nSuspend ? '<span><i style="background:#d0021b"></i>運転見合わせ ' + nSuspend + '</span>' : '') +
+      (nDelay ? '<span><i style="background:#f5a623"></i>遅延 ' + nDelay + '</span>' : '') +
+      '<span class="src">JRは実データ・他社は手動登録</span>';
+  }
 }
 
 /* ===== JR走行位置(路線図・リアルタイム) ===== */
@@ -1860,6 +1932,7 @@ function init() {
   $('#btn-gmap-map').addEventListener('click', openGmaps);
   $('#btn-locate').addEventListener('click', locateOnMap);
   $('#btn-jr-live').addEventListener('click', openJRLive);
+  $('#btn-rail-status').addEventListener('click', toggleRailStatus);
   $('#jr-done').addEventListener('click', () => { $('#jr-modal').classList.add('hidden'); stopJRTimer(); });
   $('#jr-modal').addEventListener('click', e => { if (e.target.id === 'jr-modal') { $('#jr-modal').classList.add('hidden'); stopJRTimer(); } });
 
