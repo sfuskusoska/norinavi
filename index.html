@@ -123,7 +123,13 @@
       <!-- 検索結果画面 -->
       <div id="screen-results" class="screen">
         <div id="results-banner"></div>
-        <div id="results-summary" class="results-summary"></div>
+        <div class="results-head">
+          <div id="results-summary" class="results-summary"></div>
+          <div class="seg view-seg" id="view-seg">
+            <button data-v="list" class="on">リスト</button>
+            <button data-v="board">発車標</button>
+          </div>
+        </div>
         <div id="results-list"></div>
       </div>
 

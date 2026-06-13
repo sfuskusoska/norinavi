@@ -288,6 +288,85 @@ body {
   color: #b9c6ba; font-size: 18px;
 }
 
+/* ---------- results header / view toggle ---------- */
+.results-head { display: flex; align-items: center; gap: 8px; padding: 2px 4px 10px; }
+.results-head .results-summary { flex: 1; padding: 0; }
+.view-seg { flex: none; }
+.view-seg button { padding: 7px 11px; font-size: 12px; }
+
+/* ---------- 発車標(電光掲示板)ビュー ---------- */
+#results-list.is-board { margin: 0 -2px; }
+.depboard {
+  background: #0a1020;
+  border: 1px solid #1d2740;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 6px 22px rgba(0,0,0,.4), inset 0 0 40px rgba(20,40,90,.25);
+  font-family: 'Sora', var(--font-body);
+}
+.depboard-head {
+  display: flex; align-items: center; justify-content: space-between;
+  background: linear-gradient(90deg, #13306e, #0e1f47);
+  padding: 9px 14px; color: #cfe0ff;
+}
+.bd-station { font-weight: 800; font-size: 15px; letter-spacing: .04em; }
+.bd-station::before { content: '◧ '; opacity: .6; }
+.bd-clock { font-family: 'Sora'; font-weight: 700; font-size: 16px; color: #ffd24a; letter-spacing: .06em; }
+
+/* 接近アニメーション */
+.dep-approach { padding: 12px 14px 6px; background: #070c18; }
+.appr-track {
+  position: relative; height: 30px; margin-bottom: 6px;
+}
+.appr-rail {
+  position: absolute; left: 0; right: 0; top: 50%; height: 4px; transform: translateY(-50%);
+  background: repeating-linear-gradient(90deg, #2a3a5c 0 10px, transparent 10px 18px);
+  border-radius: 2px;
+}
+.appr-home {
+  position: absolute; right: 2%; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 18px; background: #24406e;
+  border: 2px solid #4f76c0; border-radius: 3px;
+  box-shadow: 0 0 8px rgba(79,118,192,.6);
+}
+.appr-train {
+  position: absolute; top: 50%; transform: translate(-50%, -50%);
+  transition: left 2.8s linear;
+  filter: drop-shadow(0 0 6px currentColor);
+}
+.appr-track.near .appr-train { animation: trainpulse .6s ease-in-out infinite alternate; }
+@keyframes trainpulse { from { filter: drop-shadow(0 0 4px currentColor); } to { filter: drop-shadow(0 0 12px currentColor); } }
+.appr-label { font-size: 12.5px; font-weight: 700; color: #9fb4dd; text-align: center; letter-spacing: .04em; }
+.appr-label.near { color: #ffd24a; animation: blink 1s step-start infinite; }
+@keyframes blink { 50% { opacity: .35; } }
+
+.depboard-cols {
+  display: grid; grid-template-columns: 46px 40px 64px 56px 1fr;
+  gap: 6px; padding: 6px 12px; align-items: center;
+  font-size: 9.5px; color: #5e72a0; font-weight: 700; border-top: 1px solid #16203a;
+}
+.depboard-rows { padding: 2px 0 4px; }
+.bd-row {
+  display: grid; grid-template-columns: 46px 40px 64px 56px 1fr;
+  gap: 6px; padding: 11px 12px; align-items: center; cursor: pointer;
+  border-top: 1px solid #121a30;
+}
+.bd-row:active { background: #111c36; }
+.bd-order { font-size: 10.5px; font-weight: 700; color: #ffb838; }
+.bd-plat {
+  display: grid; place-items: center; width: 26px; height: 26px;
+  background: #1b50b8; color: #fff; border-radius: 5px; font-weight: 800; font-size: 14px;
+}
+.bd-time { font-family: 'Sora'; font-weight: 700; font-size: 21px; color: #ffd24a; letter-spacing: .01em; }
+.bd-type {
+  display: inline-grid; place-items: center; min-width: 50px; height: 24px; padding: 0 4px;
+  color: #fff; border-radius: 4px; font-size: 11px; font-weight: 800; text-align: center; line-height: 1.1;
+}
+.bd-dest { color: #eaf0ff; font-weight: 800; font-size: 15px; display: flex; align-items: center; gap: 6px; }
+.bd-dest::after { }
+.bd-delay { background: #c4122a; color: #fff; font-size: 9.5px; font-weight: 800; padding: 2px 5px; border-radius: 3px; }
+.depboard-note { font-size: 10px; color: #586a96; padding: 6px 12px 10px; line-height: 1.5; }
+
 /* ---------- detail ---------- */
 #detail-head { margin-bottom: 12px; }
 .detail-sum-card {

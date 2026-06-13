@@ -67,7 +67,8 @@ const state = {
   routes: [],
   current: null,          // 選択中の電車ルート
   lastSearch: null,       // { points, mode, baseMin, timeType, dateStr }
-  pathResult: null        // 自転車/徒歩の結果
+  pathResult: null,       // 自転車/徒歩の結果
+  resultView: 'list'      // list | board(発車標)
 };
 
 /* 路線の所要時間・営業キロを座標から補完(times/km が無い路線のみ自動算出) */
@@ -655,6 +656,7 @@ function currentTab() {
   return $$('.tab-btn').find(b => b.classList.contains('on')).dataset.tab;
 }
 function showScreen(name) {
+  if (name !== 'results') stopApproach(); // 結果画面以外では接近アニメを止める
   $$('#tab-nav .screen').forEach(s => s.classList.toggle('active', s.id === 'screen-' + name));
   updateHeader();
 }
@@ -924,7 +926,11 @@ function renderResults() {
   bannerEl.innerHTML = banners.join('');
 
   const list = $('#results-list');
-  if (mode !== 'train') { renderPathCard(list); return; }
+  if (mode !== 'train') { stopApproach(); list.className = ''; renderPathCard(list); return; }
+
+  if (state.resultView === 'board') { renderResultsBoard(list); return; }
+  stopApproach();
+  list.className = '';
 
   const congestionLabel = ['空いています', '普通', '混雑'];
   list.innerHTML = state.routes.map((r, idx) => {
@@ -969,6 +975,93 @@ function renderResults() {
       showScreen('detail');
     });
   });
+}
+
+/* ===== 発車標(電光掲示板)ビュー ===== */
+let approachTimer = null;
+function stopApproach() { if (approachTimer) { clearInterval(approachTimer); approachTimer = null; } }
+function nowMinutesFloat() { const d = new Date(); return d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60; }
+
+// 路線略称から発車標の種別色を決める(JR系は路線色、私鉄/メトロも路線色を使用)
+function boardDest(r) {
+  const firstRide = r.legs.find(l => l.lineId !== 'WALK');
+  return firstRide ? legDirection(firstRide).replace(/方面$/, '') : state.lastSearch.points[state.lastSearch.points.length - 1];
+}
+
+function renderResultsBoard(list) {
+  list.className = 'is-board';
+  const origin = state.lastSearch.points[0];
+  const rows = state.routes.map((r, idx) => {
+    const firstRide = r.legs.find(l => l.lineId !== 'WALK');
+    const line = firstRide ? lineById(firstRide.lineId) : null;
+    const plat = firstRide ? (hashStr(firstRide.lineId + firstRide.stations[0]) % 11) + 1 : '-';
+    const order = idx === 0 ? '次発' : idx === 1 ? '次々発' : `${idx + 1}本目`;
+    const delayTag = r.delayTotal ? `<span class="bd-delay">遅延+${r.delayTotal}</span>` : '';
+    return `
+    <div class="bd-row" data-idx="${idx}">
+      <span class="bd-order">${order}</span>
+      <span class="bd-plat">${plat}</span>
+      <span class="bd-time">${fmtTime(r.legs[0].depTime)}</span>
+      <span class="bd-type" style="background:${line ? line.color : '#555'}">${esc(line ? line.short : '徒歩')}</span>
+      <span class="bd-dest">${esc(boardDest(r))}${delayTag}</span>
+    </div>`;
+  }).join('');
+
+  list.innerHTML = `
+    <div class="depboard">
+      <div class="depboard-head">
+        <span class="bd-station">${esc(origin)}</span>
+        <span class="bd-clock" id="bd-clock"></span>
+      </div>
+      <div class="dep-approach" id="dep-approach"></div>
+      <div class="depboard-cols">
+        <span class="c-order">発車順</span><span class="c-plat">のりば</span><span class="c-time">発車時刻</span><span class="c-type">種別</span><span class="c-dest">行先</span>
+      </div>
+      <div class="depboard-rows">${rows}</div>
+      <div class="depboard-note">※時刻は計算値の目安です。正確な発車時刻は各駅の公式時刻表をご確認ください。</div>
+    </div>`;
+
+  $$('#results-list .bd-row').forEach(row => row.addEventListener('click', () => {
+    state.current = state.routes[Number(row.dataset.idx)];
+    renderDetail();
+    showScreen('detail');
+  }));
+
+  startApproach();
+}
+
+function startApproach() {
+  stopApproach();
+  const tick = () => {
+    const el = $('#dep-approach');
+    const clk = $('#bd-clock');
+    if (!el) { stopApproach(); return; }
+    const now = nowMinutesFloat();
+    if (clk) { const d = new Date(); clk.textContent = fmtTime(d.getHours() * 60 + d.getMinutes()); }
+    const soon = state.routes[0];
+    const dep = soon.legs[0].depTime;
+    let mins = dep - now;
+    // 翌日にまたぐ場合の補正(終電後始発など)
+    if (mins < -60) mins += 1440;
+    const line = lineById((soon.legs.find(l => l.lineId !== 'WALK') || {}).lineId) || { color: '#7FBE26' };
+    const clamped = Math.max(0, Math.min(12, mins));
+    const leftPct = 6 + (1 - clamped / 12) * 82; // 12分前=左端 → 0分=駅(右)
+    let label, near = false;
+    if (mins <= 0) label = 'まもなく発車 / 発車しました';
+    else if (mins < 1.2) { label = 'まもなく到着・発車'; near = true; }
+    else label = `次発まで 約${Math.ceil(mins)}分`;
+    el.innerHTML = `
+      <div class="appr-track ${near ? 'near' : ''}">
+        <span class="appr-rail"></span>
+        <span class="appr-home"></span>
+        <span class="appr-train" style="left:${leftPct}%;color:${line.color}">
+          <svg viewBox="0 0 24 24" width="26" height="26"><path d="M12 2c-4 0-7 .6-7 4v9c0 1.7 1.3 3 3 3l-1.5 2v1h2l1.5-2h4l1.5 2h2v-1L16 18c1.7 0 3-1.3 3-3V6c0-3.4-3-4-7-4zM7.5 15.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm9 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zM17 10H7V6h10v4z" fill="currentColor"/></svg>
+        </span>
+      </div>
+      <div class="appr-label ${near ? 'near' : ''}">${esc(boardDest(soon))}方面 ・ ${label}</div>`;
+  };
+  tick();
+  approachTimer = setInterval(tick, 3000);
 }
 
 function renderPathCard(list) {
@@ -1476,6 +1569,13 @@ function init() {
     if (!b) return;
     state.timeType = b.dataset.v;
     $$('#seg-timetype button').forEach(x => x.classList.toggle('on', x === b));
+  });
+  $('#view-seg').addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    state.resultView = b.dataset.v;
+    $$('#view-seg button').forEach(x => x.classList.toggle('on', x === b));
+    if (state.lastSearch && state.routes.length) renderResults();
   });
   $('#mode-row').addEventListener('click', e => {
     const b = e.target.closest('.mode-btn');
