@@ -1055,7 +1055,14 @@ function startApproach() {
         <span class="appr-rail"></span>
         <span class="appr-home"></span>
         <span class="appr-train" style="left:${leftPct}%;color:${line.color}">
-          <svg viewBox="0 0 24 24" width="26" height="26"><path d="M12 2c-4 0-7 .6-7 4v9c0 1.7 1.3 3 3 3l-1.5 2v1h2l1.5-2h4l1.5 2h2v-1L16 18c1.7 0 3-1.3 3-3V6c0-3.4-3-4-7-4zM7.5 15.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm9 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zM17 10H7V6h10v4z" fill="currentColor"/></svg>
+          <svg viewBox="0 0 48 24" width="48" height="24" aria-hidden="true">
+            <path d="M5 5h31c3.4 0 5.4 1.6 7.2 4.3l2 3c.9 1.4.3 3.2-1.3 3.2H5c-1.7 0-3-1.3-3-3V8c0-1.7 1.3-3 3-3z" fill="currentColor"/>
+            <path d="M37 6.2c2.4.3 3.9 1.7 5.4 3.9l1 1.6h-6.4z" fill="#0a1020" opacity=".5"/>
+            <g fill="#0a1020" opacity=".5"><rect x="6" y="7" width="5.2" height="4.6" rx="1"/><rect x="13.4" y="7" width="5.2" height="4.6" rx="1"/><rect x="20.8" y="7" width="5.2" height="4.6" rx="1"/><rect x="28.2" y="7" width="5.2" height="4.6" rx="1"/></g>
+            <rect x="3.5" y="13.2" width="40" height="1.6" fill="#fff" opacity=".55"/>
+            <circle cx="44" cy="13.5" r="1.1" fill="#fff"/>
+            <circle cx="12" cy="18.4" r="2.1" fill="#0a1020"/><circle cx="34" cy="18.4" r="2.1" fill="#0a1020"/>
+          </svg>
         </span>
       </div>
       <div class="appr-label ${near ? 'near' : ''}">${esc(boardDest(soon))}方面 ・ ${label}</div>`;

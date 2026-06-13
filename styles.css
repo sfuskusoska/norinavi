@@ -341,14 +341,14 @@ body {
 @keyframes blink { 50% { opacity: .35; } }
 
 .depboard-cols {
-  display: grid; grid-template-columns: 46px 40px 64px 56px 1fr;
-  gap: 6px; padding: 6px 12px; align-items: center;
+  display: grid; grid-template-columns: 40px 32px 58px 92px 1fr;
+  gap: 6px; padding: 6px 10px; align-items: center;
   font-size: 9.5px; color: #5e72a0; font-weight: 700; border-top: 1px solid #16203a;
 }
 .depboard-rows { padding: 2px 0 4px; }
 .bd-row {
-  display: grid; grid-template-columns: 46px 40px 64px 56px 1fr;
-  gap: 6px; padding: 11px 12px; align-items: center; cursor: pointer;
+  display: grid; grid-template-columns: 40px 32px 58px 92px 1fr;
+  gap: 6px; padding: 11px 10px; align-items: center; cursor: pointer;
   border-top: 1px solid #121a30;
 }
 .bd-row:active { background: #111c36; }
@@ -359,8 +359,9 @@ body {
 }
 .bd-time { font-family: 'Sora'; font-weight: 700; font-size: 21px; color: #ffd24a; letter-spacing: .01em; }
 .bd-type {
-  display: inline-grid; place-items: center; min-width: 50px; height: 24px; padding: 0 4px;
-  color: #fff; border-radius: 4px; font-size: 11px; font-weight: 800; text-align: center; line-height: 1.1;
+  display: grid; place-items: center; width: 100%; min-height: 26px; padding: 3px 5px;
+  color: #fff; border-radius: 4px; font-size: 10.5px; font-weight: 800; text-align: center;
+  line-height: 1.15; white-space: normal; word-break: keep-all; box-shadow: inset 0 -2px 0 rgba(0,0,0,.18);
 }
 .bd-dest { color: #eaf0ff; font-weight: 800; font-size: 15px; display: flex; align-items: center; gap: 6px; }
 .bd-dest::after { }
