@@ -508,6 +508,7 @@ body {
 .near-line-head { display: flex; align-items: center; gap: 7px; font-size: 14.5px; font-weight: 800; }
 .near-line-head i { width: 12px; height: 12px; border-radius: 4px; flex: none; }
 .near-line-meta { font-size: 12px; font-weight: 700; color: var(--ink-soft); margin-top: 5px; line-height: 1.6; }
+.near-dir { padding: 2px 0; }
 .near-others-label { font-size: 12px; font-weight: 800; color: var(--green-deep); margin: 14px 0 7px; letter-spacing: .06em; }
 .near-others { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
 .near-other {

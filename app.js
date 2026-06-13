@@ -301,6 +301,7 @@ const CORS_PROXIES = [
 
 let feedDelays = {};    // GitHub Actions が保存した live/delays.json 由来(バックアップ)
 let liveDelays = {};    // 取得ボタンでブラウザが直接取得した最新分
+let liveStatus = {};    // 路線ごとの方向別リアルタイム運行状況(JR)
 let liveFetchedAt = 0;
 let feedUpdatedAt = 0;
 
@@ -328,19 +329,37 @@ function jrEntry(lineId, max, trains, updateStr) {
 // 取得ボタン: 今この瞬間のJR遅延をブラウザから直接取得(約8秒鮮度)
 async function fetchLiveJRDelays() {
   const entries = {};
+  const status = {};
   let ok = 0;
   await Promise.all(JR_REALTIME.map(async ({ lineId, api }) => {
     const data = await proxyFetchJson(JR_API_BASE + api + '.json');
     if (!data || !Array.isArray(data.trains)) return;
     ok++;
+    // 方向別(dir 0/1)に運行本数・最大遅延・主な行先を集計
+    const dirs = { 0: { count: 0, max: 0, dests: {} }, 1: { count: 0, max: 0, dests: {} } };
+    for (const t of data.trains) {
+      const d = Number(t.direction) === 1 ? 1 : 0;
+      dirs[d].count++;
+      dirs[d].max = Math.max(dirs[d].max, t.delayMinutes || 0);
+      const dest = t.dest && t.dest.text;
+      if (dest) dirs[d].dests[dest] = (dirs[d].dests[dest] || 0) + 1;
+    }
+    status[lineId] = { dirs, total: data.trains.length, update: data.update };
     const max = data.trains.reduce((m, t) => Math.max(m, t.delayMinutes || 0), 0);
     if (max > 0) entries[lineId] = jrEntry(lineId, max, data.trains.length, data.update);
   }));
   if (ok === 0) return { ok: false };
   liveDelays = entries;
+  liveStatus = status;
   liveFetchedAt = Date.now();
   renderDelays();
   return { ok: true, lines: ok, delayed: Object.keys(entries).length };
+}
+
+// 方向グループの代表行先(本数の多い順に最大2つ)を「○○・△△方面」の形にする
+function dirLabel(destObj) {
+  const tops = Object.entries(destObj).sort((a, b) => b[1] - a[1]).slice(0, 2).map(e => e[0]);
+  return tops.length ? tops.join('・') + '方面' : '—';
 }
 
 // GitHub Actions が保存した live/delays.json を読み込み(初期表示・バックアップ)
@@ -1232,20 +1251,16 @@ function renderPassUI() {
 }
 
 /* ================= 最寄駅情報 ================= */
-function firstLastLabel(line) {
-  const metro = line.operator === 'OSAKAMETRO';
-  return { first: '5:00頃', last: metro ? '24:00頃' : '24:30頃' };
-}
-
 async function showNearStation() {
-  toast('現在地を取得しています…');
+  toast('現在地とリアルタイム運行情報を取得中…');
   try { await locate(); } catch { toast('位置情報を取得できませんでした。許可設定を確認してください'); return; }
-  fetchLiveJRDelays().catch(() => {}); // JR遅延を最新化(待たずに開く)
-  loadFeedDelays().catch(() => {});
   const near = nearestStations(STATIONS['現在地'], 4, 9999);
   if (!near.length) { toast('近くに収録駅がありません'); return; }
-  renderNearModal(near);
+  renderNearModal(near);                 // まず即時表示
   $('#near-modal').classList.remove('hidden');
+  await fetchLiveJRDelays().catch(() => {}); // JRのリアルタイム運行状況を取得
+  loadFeedDelays().catch(() => {});
+  renderNearModal(near);                 // 取得後に運行状況を反映
 }
 
 function renderNearModal(near) {
@@ -1254,15 +1269,29 @@ function renderNearModal(near) {
   const walkMin = Math.max(1, Math.round(main.km * 1.25 / 4.8 * 60) + 1);
   const lines = STATION_LINES[main.name] || [];
   const lineRows = lines.map(line => {
-    const fl = firstLastLabel(line);
-    const d = dmap[line.id];
-    let status;
-    if (d && d.min === 'suspend') status = '<b style="color:#7b1020">運転見合わせ</b>';
-    else if (d) status = `<b style="color:var(--red)">遅延 +${d.min}分</b>`;
-    else status = '<b style="color:var(--green-bright)">平常運転(目安)</b>';
+    const manual = dmap[line.id] && !dmap[line.id].auto ? dmap[line.id] : null;
+    const st = liveStatus[line.id];
+    let body;
+    if (manual) {
+      body = manual.min === 'suspend'
+        ? '<b style="color:#7b1020">運転見合わせ(手動登録)</b>'
+        : `<b style="color:var(--red)">遅延 +${manual.min}分(手動登録)</b>`;
+    } else if (st) {
+      // JRリアルタイム: 方向別の運行本数・最大遅延・主な行先(すべて実データ)
+      const rows = [0, 1].filter(d => st.dirs[d].count > 0).map(d => {
+        const g = st.dirs[d];
+        const delay = g.max > 0 ? `<b style="color:var(--red)">最大+${g.max}分</b>` : '<b style="color:var(--green-bright)">遅れなし</b>';
+        return `<div class="near-dir">${esc(dirLabel(g.dests))} : 運行中 ${g.count}本 ・ ${delay}</div>`;
+      }).join('');
+      body = rows || '<b style="color:var(--ink-soft)">現在この路線の走行列車はありません(終了/運行前)</b>';
+    } else if (liveFetchedAt) {
+      body = '<span style="color:var(--ink-soft)">リアルタイム運行情報なし(JR以外は未対応)</span>';
+    } else {
+      body = '<span style="color:var(--ink-soft)">運行状況を取得中…</span>';
+    }
     return `<div class="near-line">
       <div class="near-line-head"><i style="background:${line.color}"></i>${esc(line.name)}</div>
-      <div class="near-line-meta">始発 ${fl.first} ・ 終電 ${fl.last}(目安)<br>${status}</div>
+      <div class="near-line-meta">${body}</div>
     </div>`;
   }).join('');
   const others = near.slice(1).map(s =>
@@ -1275,7 +1304,7 @@ function renderNearModal(near) {
     <div class="near-lines">${lineRows || '<p class="card-sub">路線情報なし</p>'}</div>
     <button id="near-set-origin" class="primary-btn small" data-name="${esc(main.name)}">この駅を出発地に設定</button>
     ${others ? `<div class="near-others-label">他の近隣駅</div><div class="near-others">${others}</div>` : ''}
-    <p class="demo-note" style="padding:2px 2px 4px">始発・終電は時間帯モデルによる目安です。遅延はJRのみ実データ、他社は手動登録分を表示します。</p>`;
+    <p class="demo-note" style="padding:2px 2px 4px">運行状況はJR西日本「列車走行位置」の実データ(方向別の走行本数・遅延)です。始発・終電などの時刻表データは無料では入手できないため表示していません。JR以外はリアルタイム情報がありません。</p>`;
   $('#near-set-origin').addEventListener('click', e => {
     $('#input-origin').value = e.target.dataset.name;
     $('#near-modal').classList.add('hidden');
