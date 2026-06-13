@@ -236,6 +236,9 @@ body {
 }
 .banner.info { background: #e3eefa; color: #14507e; border: 1px solid #c3dcf2; }
 .banner.warn { background: #fdeaec; color: #9c1424; border: 1px solid #f6c6cc; }
+.banner.reroute-banner { cursor: pointer; background: #fff3e0; color: #9a5800; border-color: #f5d9ad; }
+.banner.reroute-banner:active { background: #ffe9cc; }
+.banner.reroute-banner u { font-weight: 800; }
 .banner svg { flex: none; margin-top: 1px; }
 
 .route-card {
@@ -704,5 +707,28 @@ body {
   max-width: 85%; text-align: center;
   animation: rise .25s;
 }
+
+.alarm-set-btn { width: 100%; margin-top: 8px; }
+
+/* 降車駅アラームバー(タブバー直上に固定) */
+#alarm-bar {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(58px + env(safe-area-inset-bottom)); z-index: 2500;
+  width: 100%; max-width: 520px;
+  display: flex; align-items: center; gap: 9px;
+  padding: 10px 14px;
+  background: var(--green-deep); color: #fff;
+  box-shadow: 0 -3px 14px rgba(0,0,0,.25);
+}
+#alarm-bar.fired { background: var(--red); animation: alarmflash .8s step-start infinite; }
+@keyframes alarmflash { 50% { background: #7b1020; } }
+#alarm-bar .alarm-ico { font-size: 18px; flex: none; }
+#alarm-bar .alarm-text { flex: 1; font-size: 12.5px; font-weight: 700; line-height: 1.4; }
+#alarm-bar .alarm-off {
+  flex: none; border: 1.5px solid rgba(255,255,255,.6); background: transparent; color: #fff;
+  font-family: var(--font-body); font-weight: 800; font-size: 12px;
+  padding: 6px 12px; border-radius: 999px; cursor: pointer;
+}
+#alarm-bar .alarm-off:active { background: rgba(255,255,255,.2); }
 
 .hidden { display: none !important; }

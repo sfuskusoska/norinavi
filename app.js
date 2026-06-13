@@ -47,7 +47,9 @@ const store = {
   get pass() { return localStorage.getItem('nn_pass') || 'none'; },
   set pass(v) { localStorage.setItem('nn_pass', v); },
   get history() { try { return JSON.parse(localStorage.getItem('nn_history') || '[]'); } catch { return []; } },
-  set history(v) { localStorage.setItem('nn_history', JSON.stringify(v)); }
+  set history(v) { localStorage.setItem('nn_history', JSON.stringify(v)); },
+  get alarm() { return localStorage.getItem('nn_alarm') || ''; },
+  set alarm(v) { v ? localStorage.setItem('nn_alarm', v) : localStorage.removeItem('nn_alarm'); }
 };
 
 const MAX_HISTORY = 8;
@@ -792,6 +794,77 @@ function locate() {
   });
 }
 
+/* ================= 降車駅アラーム(乗り過ごし防止) ================= */
+const alarm = { target: null, watchId: null, triggered: false, dist: null };
+const ALARM_KM = 1.3; // この距離まで近づいたら通知
+
+function beep() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    [0, 0.25, 0.5].forEach(t => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type = 'sine'; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.001, ctx.currentTime + t);
+      g.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + t + 0.03);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.22);
+      o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.24);
+    });
+  } catch { /* 無音でも続行 */ }
+}
+
+function armAlarm(name) {
+  if (!STATIONS[name] || isVirtual(name)) { toast('この駅にはアラームを設定できません'); return; }
+  if (!navigator.geolocation) { toast('位置情報が使えない端末です'); return; }
+  if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+  alarm.target = { name, lat: STATIONS[name].lat, lng: STATIONS[name].lng };
+  alarm.triggered = false; alarm.dist = null;
+  store.alarm = name;
+  if (alarm.watchId != null) navigator.geolocation.clearWatch(alarm.watchId);
+  alarm.watchId = navigator.geolocation.watchPosition(onAlarmPos,
+    () => {}, { enableHighAccuracy: true, maximumAge: 10000, timeout: 25000 });
+  renderAlarmBar();
+  toast(`「${name}」の降車アラームをセットしました`);
+}
+
+function onAlarmPos(pos) {
+  if (!alarm.target) return;
+  alarm.dist = haversine({ lat: pos.coords.latitude, lng: pos.coords.longitude }, alarm.target);
+  renderAlarmBar();
+  if (alarm.dist <= ALARM_KM && !alarm.triggered) { alarm.triggered = true; fireAlarm(); }
+}
+
+function fireAlarm() {
+  const n = alarm.target.name;
+  if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 500]);
+  beep();
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try { new Notification('まもなく到着', { body: `${n} に近づいています。降りる準備をしてください。`, icon: 'icon-192.png' }); } catch {}
+  }
+  toast(`まもなく「${n}」です！降車準備を`);
+  renderAlarmBar();
+}
+
+function disarmAlarm() {
+  if (alarm.watchId != null) navigator.geolocation.clearWatch(alarm.watchId);
+  alarm.watchId = null; alarm.target = null; alarm.triggered = false; alarm.dist = null;
+  store.alarm = '';
+  renderAlarmBar();
+}
+
+function renderAlarmBar() {
+  const bar = $('#alarm-bar');
+  if (!alarm.target) { bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  const d = alarm.dist;
+  const distTxt = d == null ? '位置取得中…' : (d <= ALARM_KM ? 'まもなく到着' : `あと約${d.toFixed(1)}km`);
+  bar.className = alarm.triggered ? 'fired' : '';
+  bar.innerHTML = `
+    <span class="alarm-ico">${alarm.triggered ? '🔔' : '🔕'}</span>
+    <span class="alarm-text"><b>${esc(alarm.target.name)}</b>で降車アラーム ・ ${esc(distTxt)}</span>
+    <button id="alarm-off" class="alarm-off">解除</button>`;
+  $('#alarm-off').addEventListener('click', disarmAlarm);
+}
+
 /* ================= 住所・地名のジオコーディング(OpenStreetMap Nominatim・無料) ================= */
 const geocodeCache = {};
 async function geocode(query) {
@@ -888,6 +961,26 @@ async function doSearch() {
   showScreen('results');
 }
 
+/* 遅延時の迂回提案: 遅延路線を含む経路と、遅延なしの代替を比較 */
+function rerouteSuggestion() {
+  const routes = state.routes;
+  if (!routes || routes.length < 2) return null;
+  // 遅延している路線とその分数を集める
+  const delayInfo = {};
+  for (const r of routes) for (const l of r.legs) if (l.delay > 0) delayInfo[l.lineId] = l.delay;
+  if (!Object.keys(delayInfo).length) return null;
+  // 遅延路線を一切使わない代替(到着が早い順で先頭)
+  const free = routes.filter(r => r.legs.every(l => !(l.delay > 0)));
+  if (!free.length) return null;
+  const alt = free[0];
+  // 遅延路線を使う経路が存在し、かつ代替の方が同等以上に早いときだけ提案
+  const usesDelayed = routes.some(r => r.legs.some(l => l.delay > 0));
+  if (!usesDelayed) return null;
+  const altFirst = alt.legs.find(l => l.lineId !== 'WALK');
+  const delayText = Object.entries(delayInfo).map(([id, m]) => `${lineById(id).short}+${m}分`).join('・');
+  return { alt, delayText, altLabel: altFirst ? lineById(altFirst.lineId).short : '徒歩' };
+}
+
 /* ================= 結果描画 ================= */
 function fmtDateLabel(dateStr) {
   if (!dateStr) return '';
@@ -920,10 +1013,23 @@ function renderResults() {
     const txt = autoEntries.map(d => `${lineById(d.lineId).short}+${d.min}分`).join('・');
     banners.push(`<div class="banner warn">${warnSvg()}<span>JR西日本の最新運行情報: ${esc(txt)} を所要時間に反映しています</span></div>`);
   }
+  // 遅延時の迂回提案: 遅延路線を使う経路があり、遅延の無い代替が存在するとき
+  const reroute = mode === 'train' ? rerouteSuggestion() : null;
+  if (reroute) {
+    banners.push(`<div class="banner warn reroute-banner" id="reroute-banner">${warnSvg()}<span>${esc(reroute.delayText)}が遅延中。<b>${esc(reroute.altLabel)}経由</b>なら遅延の影響が少なめです(到着 ${fmtTime(reroute.alt.arr)})<br><u>この迂回ルートを見る ›</u></span></div>`);
+  }
   if (mode === 'train' && !banners.length) {
     banners.push(`<div class="banner info">${infoSvg()}<span>運賃は通常運賃を表示しています(きっぷ/IC)</span></div>`);
   }
   bannerEl.innerHTML = banners.join('');
+  if (reroute) {
+    const rb = $('#reroute-banner');
+    if (rb) rb.addEventListener('click', () => {
+      state.current = reroute.alt;
+      renderDetail();
+      showScreen('detail');
+    });
+  }
 
   const list = $('#results-list');
   if (mode !== 'train') { stopApproach(); list.className = ''; renderPathCard(list); return; }
@@ -1713,6 +1819,13 @@ function init() {
     showRouteOnMap(state.current);
   });
   $('#btn-gmap-detail').addEventListener('click', openGmaps);
+  $('#btn-alarm').addEventListener('click', () => {
+    if (!state.current) return;
+    const last = state.current.legs[state.current.legs.length - 1];
+    const dest = last.stations[last.stations.length - 1];
+    if (isVirtual(dest)) { toast('住所指定の目的地にはアラームを設定できません(駅を指定してください)'); return; }
+    armAlarm(dest);
+  });
   $('#btn-gmap-map').addEventListener('click', openGmaps);
   $('#btn-locate').addEventListener('click', locateOnMap);
   $('#btn-jr-live').addEventListener('click', openJRLive);
@@ -1751,6 +1864,7 @@ function init() {
   renderMyStations();
   updateHeader();
   loadFeedDelays();
+  if (store.alarm && STATIONS[store.alarm]) armAlarm(store.alarm); // 移動中のリロードでも再開
 
   // デモ用の初期値
   $('#input-origin').value = '梅田';
