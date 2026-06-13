@@ -1215,6 +1215,96 @@ function marker(name, color, big) {
   return m;
 }
 
+/* ===== 地図の現在地ボタン ===== */
+let locLayer = null;
+async function locateOnMap() {
+  const btn = $('#btn-locate');
+  if (btn) btn.classList.add('loading');
+  toast('現在地を取得中…');
+  try { await locate(); } catch { toast('位置情報を取得できませんでした。許可設定を確認してください'); if (btn) btn.classList.remove('loading'); return; }
+  ensureMap();
+  const pt = STATIONS['現在地'];
+  if (locLayer) map.removeLayer(locLayer);
+  locLayer = L.layerGroup([
+    L.circleMarker([pt.lat, pt.lng], { radius: 9, color: '#fff', weight: 3, fillColor: '#1668b3', fillOpacity: 1 }),
+    L.circle([pt.lat, pt.lng], { radius: 120, color: '#1668b3', weight: 1, fillColor: '#1668b3', fillOpacity: .12 })
+  ]).addTo(map);
+  map.setView([pt.lat, pt.lng], 15);
+  setTimeout(() => map.invalidateSize(), 60);
+  const near = nearestStations(pt, 1, 9999)[0];
+  if (btn) btn.classList.remove('loading');
+  toast(near ? `現在地を表示(最寄り: ${near.name} 約${(near.km * 1.25).toFixed(1)}km)` : '現在地を表示しました');
+}
+
+/* ===== JR走行位置(路線図・リアルタイム) ===== */
+const jrMasterCache = {};
+async function fetchJRMaster(api) {
+  if (jrMasterCache[api]) return jrMasterCache[api];
+  const data = await proxyFetchJson(JR_API_BASE + api + '_st.json');
+  if (!data || !Array.isArray(data.stations)) return null;
+  const sts = data.stations.map(s => ({ code: String(s.info.code), name: s.info.name }));
+  const idx = {};
+  sts.forEach((s, i) => { idx[s.code] = i; });
+  return (jrMasterCache[api] = { sts, idx });
+}
+
+let jrTimer = null;
+let jrCurLine = JR_REALTIME[0].lineId;
+function stopJRTimer() { if (jrTimer) { clearInterval(jrTimer); jrTimer = null; } }
+
+async function openJRLive() {
+  jrCurLine = JR_REALTIME.find(j => j.lineId === jrCurLine) ? jrCurLine : JR_REALTIME[0].lineId;
+  $('#jr-line-tabs').innerHTML = JR_REALTIME.map(j =>
+    `<button class="jr-line-tab ${j.lineId === jrCurLine ? 'on' : ''}" data-line="${j.lineId}" style="--lc:${lineById(j.lineId).color}">${esc(lineById(j.lineId).short)}</button>`).join('');
+  $$('#jr-line-tabs .jr-line-tab').forEach(b => b.addEventListener('click', () => { jrCurLine = b.dataset.line; openJRLive(); }));
+  $('#jr-modal').classList.remove('hidden');
+  $('#jr-diagram').innerHTML = '<p class="jr-loading">リアルタイム走行位置を取得中…</p>';
+  await renderJRDiagram(jrCurLine);
+  stopJRTimer();
+  jrTimer = setInterval(() => { if (!$('#jr-modal').classList.contains('hidden')) renderJRDiagram(jrCurLine); else stopJRTimer(); }, 12000);
+}
+
+async function renderJRDiagram(lineId) {
+  const conf = JR_REALTIME.find(j => j.lineId === lineId);
+  const [master, data] = await Promise.all([fetchJRMaster(conf.api), proxyFetchJson(JR_API_BASE + conf.api + '.json')]);
+  if (!master || !data || !Array.isArray(data.trains)) {
+    $('#jr-diagram').innerHTML = '<p class="jr-loading">取得できませんでした(プロキシ混雑の可能性)。少し待って再度開いてください。</p>';
+    return;
+  }
+  // 各駅インデックスに、その区間を走る列車を割り当て
+  const gaps = master.sts.map(() => []);
+  for (const t of data.trains) {
+    const [fromC, toC] = String(t.pos || '').split('_');
+    const fi = master.idx[fromC];
+    if (fi == null) continue;
+    const ti = master.idx[toC];
+    const arrow = (ti != null) ? (ti > fi ? '↓' : '↑') : (Number(t.direction) === 1 ? '↑' : '↓');
+    gaps[fi].push({
+      type: cleanTrainType(t.displayType || t.type),
+      dest: (t.dest && t.dest.text) || '',
+      delay: t.delayMinutes || 0, arrow
+    });
+  }
+  const color = lineById(lineId).color;
+  const myset = new Set(MY_STATIONS);
+  const rows = master.sts.map((s, i) => {
+    const chips = gaps[i].map(tr =>
+      `<span class="jr-train ${tr.delay > 0 ? 'd' : ''}">${tr.arrow}${esc(tr.type)}${tr.dest ? ' ' + esc(tr.dest) : ''}${tr.delay > 0 ? ` +${tr.delay}` : ''}</span>`).join('');
+    const mine = (myset.has(s.name) || myset.has(resolveAlias(s.name))) ? ' mine' : '';
+    return `
+      <div class="jr-strow${mine}">
+        <span class="jr-dot" style="background:${color}"></span>
+        <span class="jr-stname">${esc(s.name)}</span>
+      </div>
+      ${chips ? `<div class="jr-gap"><span class="jr-gapline" style="background:${color}"></span><span class="jr-trains">${chips}</span></div>` : `<div class="jr-gap"><span class="jr-gapline" style="background:${color}"></span></div>`}`;
+  }).join('');
+  const total = data.trains.length;
+  $('#jr-diagram').innerHTML = `
+    <div class="jr-meta">${esc(lineById(lineId).name)} ・ 走行中 ${total}本 ・ ${new Date().toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}現在(約8秒間隔の実データ)</div>
+    <div class="jr-rail">${rows}</div>
+    <p class="jr-note">↓↑は進行方向。マイ駅は緑で強調。JR西日本「列車走行位置」の実データです。</p>`;
+}
+
 function showRouteOnMap(route) {
   ensureMap();
   routeGroup.clearLayers();
@@ -1624,6 +1714,10 @@ function init() {
   });
   $('#btn-gmap-detail').addEventListener('click', openGmaps);
   $('#btn-gmap-map').addEventListener('click', openGmaps);
+  $('#btn-locate').addEventListener('click', locateOnMap);
+  $('#btn-jr-live').addEventListener('click', openJRLive);
+  $('#jr-done').addEventListener('click', () => { $('#jr-modal').classList.add('hidden'); stopJRTimer(); });
+  $('#jr-modal').addEventListener('click', e => { if (e.target.id === 'jr-modal') { $('#jr-modal').classList.add('hidden'); stopJRTimer(); } });
 
   // 遅延
   $('#btn-delay-add').addEventListener('click', addDelay);
