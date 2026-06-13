@@ -49,7 +49,9 @@ const store = {
   get history() { try { return JSON.parse(localStorage.getItem('nn_history') || '[]'); } catch { return []; } },
   set history(v) { localStorage.setItem('nn_history', JSON.stringify(v)); },
   get alarm() { return localStorage.getItem('nn_alarm') || ''; },
-  set alarm(v) { v ? localStorage.setItem('nn_alarm', v) : localStorage.removeItem('nn_alarm'); }
+  set alarm(v) { v ? localStorage.setItem('nn_alarm', v) : localStorage.removeItem('nn_alarm'); },
+  get driveLogs() { try { return JSON.parse(localStorage.getItem('nn_drivelogs') || '[]'); } catch { return []; } },
+  set driveLogs(v) { localStorage.setItem('nn_drivelogs', JSON.stringify(v)); }
 };
 
 const MAX_HISTORY = 8;
@@ -902,6 +904,143 @@ function renderAlarmBar() {
     <span class="alarm-text"><b>${esc(alarm.target.name)}</b>で降車アラーム ・ ${esc(distTxt)}</span>
     <button id="alarm-off" class="alarm-off">解除</button>`;
   $('#alarm-off').addEventListener('click', disarmAlarm);
+}
+
+/* ================= 本日のドライブログ(走行記録＋ETC概算) ================= */
+const drive = { recording: false, watchId: null, track: [], startTs: 0, dist: 0, hwyDist: 0, hwy: false, lastPt: null, vehicle: 'normal' };
+// ETC/高速料金の概算: 本線24.6円/km + ターミナル150円(税込・普通車の目安)。正確値はNEXCO等の有料データが必要
+const ETC_RATE = 24.6, ETC_TERMINAL = 150;
+const VEHICLE = { light: { label: '軽', f: 0.8 }, normal: { label: '普通車', f: 1.0 }, medium: { label: '中型', f: 1.2 }, large: { label: '大型', f: 1.65 } };
+
+function etcEstimate(hwyKm, vehicle) {
+  if (hwyKm <= 0) return 0;
+  const f = (VEHICLE[vehicle] || VEHICLE.normal).f;
+  return Math.round((Math.ceil(hwyKm) * ETC_RATE + ETC_TERMINAL) * f / 10) * 10;
+}
+
+function startDrive() {
+  if (!navigator.geolocation) { toast('位置情報が使えない端末です'); return; }
+  drive.recording = true; drive.track = []; drive.dist = 0; drive.hwyDist = 0;
+  drive.hwy = false; drive.lastPt = null; drive.startTs = Date.now();
+  drive.vehicle = $('#drive-vehicle').value;
+  drive.watchId = navigator.geolocation.watchPosition(onDrivePos,
+    () => {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 25000 });
+  renderDrivePanel();
+  toast('走行ログの記録を開始しました');
+}
+
+function onDrivePos(pos) {
+  const p = { lat: pos.coords.latitude, lng: pos.coords.longitude, t: Date.now(), hwy: drive.hwy };
+  if (drive.lastPt) {
+    const d = haversine(drive.lastPt, p); // km
+    if (d > 0.003) { // 3m未満のブレは無視
+      drive.dist += d;
+      if (drive.hwy) drive.hwyDist += d;
+      drive.track.push(p);
+      drive.lastPt = p;
+    }
+  } else {
+    drive.lastPt = p; drive.track.push(p);
+  }
+  renderDrivePanel();
+}
+
+function stopDrive() {
+  if (drive.watchId != null) navigator.geolocation.clearWatch(drive.watchId);
+  drive.watchId = null; drive.recording = false;
+  if (drive.dist >= 0.05) {
+    const log = {
+      id: Date.now(), ts: drive.startTs, end: Date.now(),
+      dist: +drive.dist.toFixed(2), hwyDist: +drive.hwyDist.toFixed(2),
+      vehicle: drive.vehicle, etc: etcEstimate(drive.hwyDist, drive.vehicle),
+      track: decimate(drive.track, 200)
+    };
+    store.driveLogs = [log, ...store.driveLogs].slice(0, 50);
+    toast(`記録を保存しました(${log.dist.toFixed(1)}km・ETC概算${yen(log.etc)})`);
+  } else {
+    toast('記録を終了しました(距離が短いため保存しませんでした)');
+  }
+  drive.track = []; drive.dist = 0; drive.hwyDist = 0; drive.lastPt = null;
+  renderDrivePanel(); renderDriveLogs();
+}
+
+function decimate(arr, max) {
+  if (arr.length <= max) return arr.map(p => [+p.lat.toFixed(5), +p.lng.toFixed(5)]);
+  const step = Math.ceil(arr.length / max), out = [];
+  for (let i = 0; i < arr.length; i += step) out.push([+arr[i].lat.toFixed(5), +arr[i].lng.toFixed(5)]);
+  return out;
+}
+
+function fmtDur2(ms) {
+  const m = Math.round(ms / 60000);
+  return m < 60 ? `${m}分` : `${Math.floor(m / 60)}時間${m % 60}分`;
+}
+
+function renderDrivePanel() {
+  const stats = $('#drive-stats');
+  if (!stats) return;
+  const dur = drive.recording ? Date.now() - drive.startTs : 0;
+  const etc = etcEstimate(drive.hwyDist, drive.vehicle);
+  stats.innerHTML = `
+    <div class="ds-item"><span class="ds-v">${drive.dist.toFixed(1)}</span><span class="ds-l">km 走行</span></div>
+    <div class="ds-item"><span class="ds-v">${drive.hwyDist.toFixed(1)}</span><span class="ds-l">km 高速</span></div>
+    <div class="ds-item"><span class="ds-v">${drive.recording ? fmtDur2(dur) : '—'}</span><span class="ds-l">経過</span></div>
+    <div class="ds-item etc"><span class="ds-v">${yen(etc)}</span><span class="ds-l">ETC概算</span></div>`;
+  const tg = $('#drive-toggle');
+  if (tg) { tg.textContent = drive.recording ? '記録を停止' : '記録を開始'; tg.classList.toggle('rec', drive.recording); }
+  const hb = $('#drive-hwy');
+  if (hb) { hb.textContent = '高速 ' + (drive.hwy ? 'ON' : 'OFF'); hb.classList.toggle('on', drive.hwy); }
+}
+
+function renderDriveLogs() {
+  const el = $('#drive-logs');
+  if (!el) return;
+  const logs = store.driveLogs;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todays = logs.filter(l => l.ts >= today.getTime());
+  const sumDist = todays.reduce((s, l) => s + l.dist, 0);
+  const sumEtc = todays.reduce((s, l) => s + l.etc, 0);
+  let html = '';
+  if (todays.length) {
+    html += `<div class="drive-total">本日の合計: <b>${sumDist.toFixed(1)}km</b> ・ ETC概算 <b>${yen(sumEtc)}</b>(${todays.length}件)</div>`;
+  }
+  if (!logs.length) {
+    html += '<p class="card-sub" style="margin:8px 0 0">記録はまだありません。「記録を開始」で本日の走行を残せます。</p>';
+  } else {
+    html += logs.slice(0, 10).map(l => {
+      const d = new Date(l.ts);
+      return `<div class="drive-log" data-id="${l.id}">
+        <div class="dl-body">
+          <div class="dl-head">${d.getMonth() + 1}/${d.getDate()} ${fmtTime(d.getHours() * 60 + d.getMinutes())} ・ ${(VEHICLE[l.vehicle] || VEHICLE.normal).label}</div>
+          <div class="dl-meta">${l.dist.toFixed(1)}km(高速${l.hwyDist.toFixed(1)}km) ・ ${fmtDur2(l.end - l.ts)} ・ ETC概算 ${yen(l.etc)}</div>
+        </div>
+        <button class="dl-map" data-id="${l.id}">地図</button>
+        <button class="dl-del" data-id="${l.id}">削除</button>
+      </div>`;
+    }).join('');
+  }
+  el.innerHTML = html;
+  $$('#drive-logs .dl-del').forEach(b => b.addEventListener('click', () => {
+    store.driveLogs = store.driveLogs.filter(x => String(x.id) !== b.dataset.id);
+    renderDriveLogs();
+  }));
+  $$('#drive-logs .dl-map').forEach(b => b.addEventListener('click', () => {
+    const log = store.driveLogs.find(x => String(x.id) === b.dataset.id);
+    if (log) showDriveTrack(log.track);
+  }));
+}
+
+function showDriveTrack(track) {
+  if (!track || !track.length) { toast('この記録には経路データがありません'); return; }
+  switchTab('map');
+  ensureMap();
+  routeGroup.clearLayers();
+  L.polyline(track, { color: '#1668b3', weight: 6, opacity: .9 }).addTo(routeGroup);
+  L.circleMarker(track[0], { radius: 8, color: '#fff', weight: 2.5, fillColor: '#067a46', fillOpacity: 1 }).addTo(routeGroup);
+  L.circleMarker(track[track.length - 1], { radius: 8, color: '#fff', weight: 2.5, fillColor: '#d92638', fillOpacity: 1 }).addTo(routeGroup);
+  fitMap(L.latLngBounds(track));
+  $('#map-route-info').innerHTML = '走行ログを表示中';
+  $('#map-route-info').classList.remove('hidden');
 }
 
 /* ================= 住所・地名のジオコーディング(OpenStreetMap Nominatim・無料) ================= */
@@ -1969,6 +2108,19 @@ function init() {
   updateHeader();
   loadFeedDelays();
   if (store.alarm && STATIONS[store.alarm]) armAlarm(store.alarm); // 移動中のリロードでも再開
+
+  // ドライブログ
+  $('#drive-toggle').addEventListener('click', () => drive.recording ? stopDrive() : startDrive());
+  $('#drive-hwy').addEventListener('click', () => { drive.hwy = !drive.hwy; renderDrivePanel(); });
+  $('#drive-vehicle').addEventListener('change', () => { drive.vehicle = $('#drive-vehicle').value; renderDrivePanel(); });
+  $('#drive-map').addEventListener('click', () => {
+    const last = store.driveLogs[0];
+    if (last && last.track) showDriveTrack(last.track);
+    else if (drive.track.length) showDriveTrack(decimate(drive.track, 200));
+    else toast('表示できる走行ログがありません');
+  });
+  renderDrivePanel();
+  renderDriveLogs();
 
   // デモ用の初期値
   $('#input-origin').value = '梅田';

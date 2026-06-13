@@ -217,6 +217,28 @@
 
     <!-- ========== メニュータブ ========== -->
     <section id="tab-menu" class="tab-page">
+      <div class="card drive-card">
+        <h2 class="card-title">
+          <svg viewBox="0 0 24 24" width="19" height="19"><path d="M5 11l1.5-4.5A2 2 0 018.4 5h7.2a2 2 0 011.9 1.5L19 11m-14 0h14m-14 0a2 2 0 00-2 2v4h2m12-6a2 2 0 012 2v4h-2m-12 0h12m-12 0v2H5v-2m12 0v2h2v-2M7 14h2m6 0h2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          本日のドライブログ
+        </h2>
+        <p class="card-sub">走行ルートを記録し、ETC料金(概算)を合算します。高速道路を走る区間は「高速ON」にしてください。</p>
+        <div class="drive-stats" id="drive-stats"></div>
+        <div class="drive-controls">
+          <label class="drive-veh">車種
+            <select id="drive-vehicle">
+              <option value="light">軽自動車</option>
+              <option value="normal" selected>普通車</option>
+              <option value="medium">中型車</option>
+              <option value="large">大型車</option>
+            </select>
+          </label>
+          <button id="drive-hwy" class="drive-hwy">高速 OFF</button>
+        </div>
+        <button id="drive-toggle" class="primary-btn small">記録を開始</button>
+        <button id="drive-map" class="secondary-btn" style="width:100%;margin-top:8px">走行ルートを地図で見る</button>
+        <div id="drive-logs"></div>
+      </div>
       <div class="card menu-card">
         <h2 class="card-title">メニュー</h2>
         <button class="menu-item" id="menu-pass">
