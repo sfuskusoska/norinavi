@@ -508,7 +508,17 @@ body {
 .near-line-head { display: flex; align-items: center; gap: 7px; font-size: 14.5px; font-weight: 800; }
 .near-line-head i { width: 12px; height: 12px; border-radius: 4px; flex: none; }
 .near-line-meta { font-size: 12px; font-weight: 700; color: var(--ink-soft); margin-top: 5px; line-height: 1.6; }
-.near-dir { padding: 2px 0; }
+.near-dir { padding: 4px 0; }
+.near-dir-top { font-weight: 800; color: var(--ink); }
+.near-dir-types { font-size: 11.5px; font-weight: 700; color: var(--ink-soft); margin-top: 1px; }
+.poi-row { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 4px; }
+.poi-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  text-decoration: none; border: 1.5px solid var(--blue); color: var(--blue);
+  background: #f0f6fc; border-radius: 999px; padding: 8px 13px;
+  font-family: var(--font-body); font-weight: 800; font-size: 12.5px;
+}
+.poi-btn:active { background: #dceafa; }
 .dir-now { background: var(--green); color: #fff; font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
 .near-links { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
 .link-btn {

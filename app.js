@@ -361,13 +361,15 @@ async function fetchLiveJRDelays() {
     if (!data || !Array.isArray(data.trains)) return;
     ok++;
     // 方向別(dir 0/1)に運行本数・最大遅延・主な行先を集計
-    const dirs = { 0: { count: 0, max: 0, dests: {} }, 1: { count: 0, max: 0, dests: {} } };
+    const dirs = { 0: { count: 0, max: 0, dests: {}, types: {} }, 1: { count: 0, max: 0, dests: {}, types: {} } };
     for (const t of data.trains) {
       const d = Number(t.direction) === 1 ? 1 : 0;
       dirs[d].count++;
       dirs[d].max = Math.max(dirs[d].max, t.delayMinutes || 0);
       const dest = t.dest && t.dest.text;
       if (dest) dirs[d].dests[dest] = (dirs[d].dests[dest] || 0) + 1;
+      const ty = cleanTrainType(t.displayType || t.type);
+      dirs[d].types[ty] = (dirs[d].types[ty] || 0) + 1;
     }
     status[lineId] = { dirs, total: data.trains.length, update: data.update };
     const max = data.trains.reduce((m, t) => Math.max(m, t.delayMinutes || 0), 0);
@@ -385,6 +387,22 @@ async function fetchLiveJRDelays() {
 function dirLabel(destObj) {
   const tops = Object.entries(destObj).sort((a, b) => b[1] - a[1]).slice(0, 2).map(e => e[0]);
   return tops.length ? tops.join('・') + '方面' : '—';
+}
+
+// displayType の装飾を落として代表的な種別名に正規化
+const TRAIN_TYPES = ['新快速', '区間快速', '直通快速', '大和路快速', '関空快速', '紀州路快速', '快速', '特急', '急行', '準急', '普通'];
+function cleanTrainType(s) {
+  for (const k of TRAIN_TYPES) if (s && s.includes(k)) return k;
+  return s || '列車';
+}
+// 種別内訳を「新快速2・快速3・普通5」の形に(本数の多い順)
+function typeSummary(typesObj) {
+  return Object.entries(typesObj).sort((a, b) => b[1] - a[1]).map(([t, n]) => `${t}${n}`).join('・');
+}
+
+// Googleマップ周辺検索URL(指定座標を中心に検索)
+function gmapNearbyUrl(query, pt) {
+  return `https://www.google.com/maps/search/${encodeURIComponent(query)}/@${pt.lat.toFixed(6)},${pt.lng.toFixed(6)},16z`;
 }
 
 // GitHub Actions が保存した live/delays.json を読み込み(初期表示・バックアップ)
@@ -1342,7 +1360,10 @@ function renderStationCard(main, related) {
         const delay = g.max > 0 ? `<b style="color:var(--red)">最大+${g.max}分</b>` : '<b style="color:var(--green-bright)">遅れなし</b>';
         // 片方向のみが目的の方面なら「今の方向」バッジを付ける(環状線など両方向該当時は付けない)
         const hot = (facingDirs.length === 1 && facingDirs[0] === d) ? `<span class="dir-now">${esc(facing)}</span>` : '';
-        return `<div class="near-dir">${esc(dirLabel(g.dests))}${hot} : 運行中 ${g.count}本 ・ ${delay}</div>`;
+        return `<div class="near-dir">
+          <div class="near-dir-top">${esc(dirLabel(g.dests))}${hot} ・ ${delay}</div>
+          <div class="near-dir-types">運行中 ${g.count}本(${esc(typeSummary(g.types))})</div>
+        </div>`;
       }).join('');
       body = rows || '<b style="color:var(--ink-soft)">現在この路線の走行列車はありません(終了/運行前)</b>';
     } else if (liveFetchedAt) {
@@ -1367,20 +1388,46 @@ function renderStationCard(main, related) {
   const others = (related || []).map(s =>
     `<button class="near-other" data-name="${esc(s.name)}">${esc(s.name)}${s.km != null ? ` <small>約${(s.km * 1.25).toFixed(1)}km</small>` : ''}</button>`).join('');
 
+  // 周辺検索の中心: GPSがあれば現在地、無ければ駅座標
+  const center = (main.km != null && STATIONS['現在地']) ? STATIONS['現在地'] : STATIONS[main.name];
+  const POI = [['スーパー', 'スーパーマーケット'], ['コンビニ', 'コンビニ'], ['カフェ', 'カフェ'], ['飲食店', 'レストラン'], ['ATM', 'ATM'], ['トイレ', 'トイレ']];
+  const poiBtns = center ? POI.map(([label, q]) =>
+    `<a class="poi-btn" href="${gmapNearbyUrl(q, center)}" target="_blank" rel="noopener">${esc(label)}</a>`).join('') : '';
+
+  const updateBtn = main.km != null
+    ? '<button id="near-update" class="link-btn alt"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M21 12a9 9 0 11-3-6.7M21 4v4h-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>現在地と運行情報を更新</button>'
+    : '<button id="near-update" class="link-btn alt"><svg viewBox="0 0 24 24" width="16" height="16"><path d="M21 12a9 9 0 11-3-6.7M21 4v4h-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>運行情報を更新</button>';
+
   $('#near-body').innerHTML = `
     <div class="near-main">
       <div class="near-dist">${main.km != null ? `現在地から 約${(main.km * 1.25).toFixed(1)}km ・ 徒歩約${Math.max(1, Math.round(main.km * 1.25 / 4.8 * 60) + 1)}分` : '駅情報'} ・ 現在は<b>${esc(facing)}</b>が基本</div>
       <div class="near-name">${esc(main.name)}</div>
     </div>
+    ${updateBtn}
     <div class="near-lines">${lineRows || '<p class="card-sub">路線情報なし</p>'}</div>
     <div class="near-links">${ttBtn}${delayBtn}</div>
+    ${poiBtns ? `<div class="near-others-label">周辺を探す(Googleマップ・徒歩時間も表示)</div><div class="poi-row">${poiBtns}</div>` : ''}
     <div class="near-set-row">
       <button class="secondary-btn" data-set="origin" data-name="${esc(main.name)}">出発地に設定</button>
       <button class="secondary-btn" data-set="dest" data-name="${esc(main.name)}">目的地に設定</button>
     </div>
     ${others ? `<div class="near-others-label">${main.km != null ? '他の近隣駅' : 'マイ駅を切り替え'}</div><div class="near-others">${others}</div>` : ''}
-    <p class="demo-note" style="padding:2px 2px 4px">運行状況はJR西日本「列車走行位置」の実データ(方向別の走行本数・遅延)です。正確な始発・終電は公式時刻表でご確認ください(無料の時刻表データが無いためアプリ内には表示していません)。JR以外はリアルタイム情報がありません。</p>`;
+    <p class="demo-note" style="padding:2px 2px 4px">運行状況はJR西日本「列車走行位置」の実データ(種別・方向別の走行本数・遅延)です。正確な始発・終電・次の発車時刻は公式時刻表でご確認ください(無料の時刻表データが無いためアプリ内には表示していません)。周辺検索・徒歩時間はGoogleマップで表示します。JR以外はリアルタイム情報がありません。</p>`;
 
+  const upd = $('#near-update');
+  if (upd) upd.addEventListener('click', async () => {
+    upd.disabled = true; upd.style.opacity = '.6';
+    if (main.km != null) { try { await locate(); } catch {} }
+    await fetchLiveJRDelays().catch(() => {});
+    await loadFeedDelays().catch(() => {});
+    if (main.km != null) {
+      const near = nearestStations(STATIONS['現在地'], 4, 9999);
+      if (near.length) renderStationCard(near[0], near.slice(1));
+    } else {
+      renderStationCard(main, related);
+    }
+    toast('最新の運行情報に更新しました');
+  });
   $$('#near-body [data-set]').forEach(b => b.addEventListener('click', e => {
     const t = e.currentTarget;
     $(t.dataset.set === 'origin' ? '#input-origin' : '#input-dest').value = t.dataset.name;
