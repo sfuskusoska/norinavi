@@ -1584,6 +1584,75 @@ function drawRailStatus() {
   }
 }
 
+/* ===== 近隣駐車場(OpenStreetMap Overpass・無料/合法/キー不要) ===== */
+let parkingLayer = null;
+let parkingOn = false;
+
+async function fetchParking(lat, lng, radius) {
+  const q = `[out:json][timeout:20];(node["amenity"="parking"](around:${radius},${lat},${lng});way["amenity"="parking"](around:${radius},${lat},${lng}););out center 80;`;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST', body: 'data=' + encodeURIComponent(q)
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.elements || []).map(e => {
+      const t = e.tags || {};
+      const p = e.type === 'node' ? { lat: e.lat, lng: e.lon } : (e.center ? { lat: e.center.lat, lng: e.center.lon } : null);
+      if (!p) return null;
+      return {
+        lat: p.lat, lng: p.lng,
+        name: t.name || (t.parking === 'multi-storey' ? '立体駐車場' : t.parking === 'underground' ? '地下駐車場' : '駐車場'),
+        cap: t.capacity || null,
+        fee: t.fee === 'no' ? '無料' : (t.fee === 'yes' || t.charge ? '有料' : null),
+        charge: t.charge || null,
+        access: t.access || null
+      };
+    }).filter(Boolean);
+  } catch { return null; }
+}
+
+async function toggleParking() {
+  ensureMap();
+  parkingOn = true;
+  $('#btn-parking').classList.add('loading');
+  toast('周辺の駐車場を検索中…');
+  const c = map.getCenter();
+  const list = await fetchParking(c.lat, c.lng, 800);
+  $('#btn-parking').classList.remove('loading');
+  if (!list) { toast('駐車場情報を取得できませんでした(時間をおいて再試行)'); return; }
+  $('#btn-parking').classList.add('on');
+  drawParking(list, c);
+}
+
+function clearParking() {
+  parkingOn = false;
+  if (parkingLayer) { map.removeLayer(parkingLayer); parkingLayer = null; }
+  $('#parking-legend').classList.add('hidden');
+  $('#btn-parking').classList.remove('on');
+}
+
+function drawParking(list, center) {
+  if (parkingLayer) map.removeLayer(parkingLayer);
+  parkingLayer = L.layerGroup().addTo(map);
+  for (const p of list) {
+    const dist = haversine(center, p);
+    const icon = L.divIcon({ className: 'pk-pin', html: 'P', iconSize: [22, 22] });
+    const m = L.marker([p.lat, p.lng], { icon }).addTo(parkingLayer);
+    const gmap = `https://www.google.com/maps/dir/?api=1&destination=${p.lat.toFixed(6)},${p.lng.toFixed(6)}&travelmode=driving`;
+    m.bindPopup(
+      `<b>${esc(p.name)}</b><br>` +
+      `${p.cap ? '収容 ' + esc(p.cap) + '台 ・ ' : ''}${p.fee ? esc(p.fee) : '料金不明'}<br>` +
+      `${p.charge ? esc(p.charge) + '<br>' : ''}` +
+      `約${(dist * 1000).toFixed(0)}m ・ <a href="${gmap}" target="_blank" rel="noopener">ここへナビ(Google)</a>`
+    );
+  }
+  const leg = $('#parking-legend');
+  leg.classList.remove('hidden');
+  leg.innerHTML = `<span><b>P</b> 周辺の駐車場 ${list.length}件</span><span class="src">OpenStreetMap・満空/予約は非対応</span><button id="pk-clear">×</button>`;
+  $('#pk-clear').addEventListener('click', clearParking);
+}
+
 /* ===== JR走行位置(路線図・リアルタイム) ===== */
 const jrMasterCache = {};
 async function fetchJRMaster(api) {
@@ -2072,6 +2141,7 @@ function init() {
   $('#btn-locate').addEventListener('click', locateOnMap);
   $('#btn-jr-live').addEventListener('click', openJRLive);
   $('#btn-rail-status').addEventListener('click', toggleRailStatus);
+  $('#btn-parking').addEventListener('click', toggleParking);
   $('#jr-done').addEventListener('click', () => { $('#jr-modal').classList.add('hidden'); stopJRTimer(); });
   $('#jr-modal').addEventListener('click', e => { if (e.target.id === 'jr-modal') { $('#jr-modal').classList.add('hidden'); stopJRTimer(); } });
 
