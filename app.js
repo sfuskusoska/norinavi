@@ -527,6 +527,16 @@ function scheduleRoute(r, baseMin, timeType) {
   r.total = r.arr - r.dep;
 }
 
+// 同じ経路の「k本後の便」を生成(運転間隔ぶん時刻をずらす)。終電後に入るならnull
+function shiftRoute(r, k) {
+  const fr = r.legs.find(l => l.lineId !== 'WALK');
+  if (!fr) return null;
+  const delta = (headwayFor(fr.lineId, r.dep) || 5) * k;
+  const legs = r.legs.map(l => ({ ...l, depTime: l.depTime + delta, arrTime: l.arrTime + delta }));
+  if (legs.some(l => l.lineId !== 'WALK' && inDeadZone(l.depTime))) return null;
+  return { ...r, legs, dep: r.dep + delta, arr: r.arr + delta, total: r.total, badges: [], isLater: true };
+}
+
 function assignBadges(routes) {
   if (!routes.length) return;
   const minTotal = Math.min(...routes.map(r => r.total));
@@ -596,7 +606,28 @@ function searchTrainRoutes(points, baseMin, timeType, passId) {
     (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) ||
     a.arr - b.arr || a.transfers - b.transfers);
   assignBadges(valid);
-  return valid;
+
+  // 結果が少ない時は各経路の次発・次々発を加えてリストを充実させる(到着指定時は除く)
+  const TARGET = 6;
+  const expanded = valid.slice();
+  if (timeType !== 'arr') {
+    const dseen = new Set(expanded.map(r => r.sig + '@' + r.dep));
+    for (let k = 1; k <= 3 && expanded.length < TARGET; k++) {
+      for (const r of valid) {
+        if (expanded.length >= TARGET) break;
+        const v = shiftRoute(r, k);
+        if (!v) continue;
+        const key = v.sig + '@' + v.dep;
+        if (dseen.has(key)) continue;
+        dseen.add(key);
+        expanded.push(v);
+      }
+    }
+  }
+  expanded.sort((a, b) =>
+    (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) ||
+    a.dep - b.dep || a.arr - b.arr);
+  return expanded;
 }
 
 function legDirection(leg) {
