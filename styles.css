@@ -509,6 +509,34 @@ body {
 .near-line-head i { width: 12px; height: 12px; border-radius: 4px; flex: none; }
 .near-line-meta { font-size: 12px; font-weight: 700; color: var(--ink-soft); margin-top: 5px; line-height: 1.6; }
 .near-dir { padding: 2px 0; }
+.dir-now { background: var(--green); color: #fff; font-size: 9.5px; font-weight: 800; padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
+.near-links { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.link-btn {
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  text-decoration: none; border-radius: 11px; padding: 12px;
+  font-family: var(--font-body); font-weight: 800; font-size: 13.5px;
+  background: var(--blue); color: #fff; box-shadow: 0 3px 10px rgba(22,104,179,.25);
+}
+.link-btn.alt { background: #fff; color: var(--green-deep); border: 1.5px solid var(--green); box-shadow: none; }
+.link-btn:active { transform: translateY(1px); }
+.near-set-row { display: flex; gap: 8px; }
+.near-set-row .secondary-btn { flex: 1; }
+
+/* マイ駅カード(ホーム) */
+.my-stations-card { padding: 12px 14px; }
+.my-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
+.my-title { font-size: 12px; font-weight: 800; color: var(--green-deep); letter-spacing: .06em; }
+.my-facing { font-size: 11px; font-weight: 800; color: var(--amber); }
+.my-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.my-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1.5px solid var(--line); background: #f8faf7; color: var(--ink);
+  font-family: var(--font-body); font-weight: 800; font-size: 13.5px;
+  padding: 9px 13px; border-radius: 999px; cursor: pointer;
+}
+.my-chip:active { background: #e7f0e4; }
+.my-chip-dots { display: inline-flex; gap: 2px; }
+.my-chip-dots i { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
 .near-others-label { font-size: 12px; font-weight: 800; color: var(--green-deep); margin: 14px 0 7px; letter-spacing: .06em; }
 .near-others { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
 .near-other {

@@ -292,6 +292,31 @@ const JR_REALTIME = [
 ];
 const JR_API_BASE = 'https://www.train-guide.westjr.co.jp/api/v3/';
 
+// JR西日本 公式運行情報(近畿エリア)
+const JR_DELAY_OFFICIAL = 'https://trafficinfo.westjr.co.jp/kinki.html';
+
+// よく使う駅(マイ駅)。収録駅名 → 公式時刻表(JRおでかけネット)URL
+const MY_STATIONS = ['三宮', '大阪天満宮', '梅田'];
+const TIMETABLE_URL = {
+  '梅田': 'https://www.jr-odekake.net/eki/timetable?id=0610130',       // JR大阪駅
+  '三宮': 'https://www.jr-odekake.net/eki/timetable?id=0610143',       // JR三ノ宮駅
+  '大阪天満宮': 'https://www.jr-odekake.net/eki/timetable?id=0612302'  // JR大阪天満宮駅
+};
+// 行先キーワードから方面を判定(リアルタイム実データの dest で方向を見分ける)
+const DIR_KEYWORDS = {
+  '大阪方面': ['大阪', '京都', '野洲', '米原', '環状', '京橋', '高槻', '草津'],
+  '三ノ宮方面': ['三ノ宮', '三宮', '神戸', '西明石', '姫路', '須磨', '明石', '加古川']
+};
+// 時間帯による基本の向き(午前=大阪方面・午後=三ノ宮方面)
+function preferredDir() {
+  const h = new Date().getHours();
+  return h < 12 ? '大阪方面' : '三ノ宮方面';
+}
+function destFaces(dests, facing) {
+  const kws = DIR_KEYWORDS[facing] || [];
+  return Object.keys(dests).some(d => kws.some(k => d.includes(k)));
+}
+
 // ブラウザから他ドメインを取得するための公開CORSプロキシ(上から順に試す)
 const CORS_PROXIES = [
   u => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
@@ -1142,6 +1167,10 @@ function renderDelays() {
         <svg viewBox="0 0 24 24" width="16" height="16" style="margin-right:5px"><path d="M21 12a9 9 0 11-3-6.7M21 4v4h-4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         JRの最新遅延を取得
       </button>
+      <a class="link-btn alt" href="${JR_DELAY_OFFICIAL}" target="_blank" rel="noopener" style="margin-top:8px">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path d="M14 3h7v7M21 3l-9 9M10 5H5a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2v-5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        JR西日本 公式運行情報を開く
+      </a>
       ${auto.length ? auto.map(d => {
         const line = lineById(d.lineId);
         const dt = new Date(d.ts);
@@ -1256,17 +1285,45 @@ async function showNearStation() {
   try { await locate(); } catch { toast('位置情報を取得できませんでした。許可設定を確認してください'); return; }
   const near = nearestStations(STATIONS['現在地'], 4, 9999);
   if (!near.length) { toast('近くに収録駅がありません'); return; }
-  renderNearModal(near);                 // まず即時表示
+  renderStationCard(near[0], near.slice(1));    // まず即時表示
   $('#near-modal').classList.remove('hidden');
-  await fetchLiveJRDelays().catch(() => {}); // JRのリアルタイム運行状況を取得
+  await fetchLiveJRDelays().catch(() => {});    // JRのリアルタイム運行状況を取得
   loadFeedDelays().catch(() => {});
-  renderNearModal(near);                 // 取得後に運行状況を反映
+  renderStationCard(near[0], near.slice(1));    // 取得後に運行状況を反映
 }
 
-function renderNearModal(near) {
+// ホーム画面のマイ駅チップを描画
+function renderMyStations() {
+  const facing = preferredDir();
+  const fEl = $('#my-facing');
+  if (fEl) fEl.textContent = (new Date().getHours() < 12 ? '午前' : '午後') + ' → ' + facing;
+  const wrap = $('#my-stations-chips');
+  if (!wrap) return;
+  wrap.innerHTML = MY_STATIONS.filter(n => STATIONS[n]).map(n => {
+    const lines = (STATION_LINES[n] || []).slice(0, 3).map(l => `<i style="background:${l.color}"></i>`).join('');
+    return `<button class="my-chip" data-name="${esc(n)}"><span class="my-chip-dots">${lines}</span>${esc(n)}</button>`;
+  }).join('');
+  $$('#my-stations-chips .my-chip').forEach(b => b.addEventListener('click', () => showMyStations(b.dataset.name)));
+}
+
+// マイ駅(よく使う駅)の運行状況を開く
+async function showMyStations(startName) {
+  const list = MY_STATIONS.filter(n => STATIONS[n]).map(n => ({ name: n, km: null }));
+  if (!list.length) return;
+  const idx = Math.max(0, list.findIndex(s => s.name === startName));
+  const main = list[idx];
+  toast('リアルタイム運行情報を取得中…');
+  renderStationCard(main, list.filter(s => s.name !== main.name));
+  $('#near-modal').classList.remove('hidden');
+  await fetchLiveJRDelays().catch(() => {});
+  loadFeedDelays().catch(() => {});
+  renderStationCard(main, list.filter(s => s.name !== main.name));
+}
+
+// 駅情報モーダルを描画。main={name, km?(現在地からの距離)}、related=他駅リスト
+function renderStationCard(main, related) {
   const dmap = delayMap();
-  const main = near[0];
-  const walkMin = Math.max(1, Math.round(main.km * 1.25 / 4.8 * 60) + 1);
+  const facing = preferredDir();
   const lines = STATION_LINES[main.name] || [];
   const lineRows = lines.map(line => {
     const manual = dmap[line.id] && !dmap[line.id].auto ? dmap[line.id] : null;
@@ -1278,10 +1335,14 @@ function renderNearModal(near) {
         : `<b style="color:var(--red)">遅延 +${manual.min}分(手動登録)</b>`;
     } else if (st) {
       // JRリアルタイム: 方向別の運行本数・最大遅延・主な行先(すべて実データ)
-      const rows = [0, 1].filter(d => st.dirs[d].count > 0).map(d => {
+      const active = [0, 1].filter(d => st.dirs[d].count > 0);
+      const facingDirs = active.filter(d => destFaces(st.dirs[d].dests, facing));
+      const rows = active.map(d => {
         const g = st.dirs[d];
         const delay = g.max > 0 ? `<b style="color:var(--red)">最大+${g.max}分</b>` : '<b style="color:var(--green-bright)">遅れなし</b>';
-        return `<div class="near-dir">${esc(dirLabel(g.dests))} : 運行中 ${g.count}本 ・ ${delay}</div>`;
+        // 片方向のみが目的の方面なら「今の方向」バッジを付ける(環状線など両方向該当時は付けない)
+        const hot = (facingDirs.length === 1 && facingDirs[0] === d) ? `<span class="dir-now">${esc(facing)}</span>` : '';
+        return `<div class="near-dir">${esc(dirLabel(g.dests))}${hot} : 運行中 ${g.count}本 ・ ${delay}</div>`;
       }).join('');
       body = rows || '<b style="color:var(--ink-soft)">現在この路線の走行列車はありません(終了/運行前)</b>';
     } else if (liveFetchedAt) {
@@ -1294,25 +1355,43 @@ function renderNearModal(near) {
       <div class="near-line-meta">${body}</div>
     </div>`;
   }).join('');
-  const others = near.slice(1).map(s =>
-    `<button class="near-other" data-name="${esc(s.name)}">${esc(s.name)} <small>約${(s.km * 1.25).toFixed(1)}km</small></button>`).join('');
+
+  const tt = TIMETABLE_URL[main.name];
+  const ttBtn = tt ? `<a class="link-btn" href="${tt}" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path d="M7 3v4M17 3v4M4 8h16M5 5h14a1 1 0 011 1v13a1 1 0 01-1 1H5a1 1 0 01-1-1V6a1 1 0 011-1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      公式時刻表(始発・終電)</a>` : '';
+  const delayBtn = `<a class="link-btn alt" href="${JR_DELAY_OFFICIAL}" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 3L2 20h20L12 3zm0 6v5m0 3v.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      JR西日本 公式運行情報</a>`;
+
+  const others = (related || []).map(s =>
+    `<button class="near-other" data-name="${esc(s.name)}">${esc(s.name)}${s.km != null ? ` <small>約${(s.km * 1.25).toFixed(1)}km</small>` : ''}</button>`).join('');
+
   $('#near-body').innerHTML = `
     <div class="near-main">
-      <div class="near-dist">現在地から 約${(main.km * 1.25).toFixed(1)}km ・ 徒歩約${walkMin}分</div>
+      <div class="near-dist">${main.km != null ? `現在地から 約${(main.km * 1.25).toFixed(1)}km ・ 徒歩約${Math.max(1, Math.round(main.km * 1.25 / 4.8 * 60) + 1)}分` : '駅情報'} ・ 現在は<b>${esc(facing)}</b>が基本</div>
       <div class="near-name">${esc(main.name)}</div>
     </div>
     <div class="near-lines">${lineRows || '<p class="card-sub">路線情報なし</p>'}</div>
-    <button id="near-set-origin" class="primary-btn small" data-name="${esc(main.name)}">この駅を出発地に設定</button>
-    ${others ? `<div class="near-others-label">他の近隣駅</div><div class="near-others">${others}</div>` : ''}
-    <p class="demo-note" style="padding:2px 2px 4px">運行状況はJR西日本「列車走行位置」の実データ(方向別の走行本数・遅延)です。始発・終電などの時刻表データは無料では入手できないため表示していません。JR以外はリアルタイム情報がありません。</p>`;
-  $('#near-set-origin').addEventListener('click', e => {
-    $('#input-origin').value = e.target.dataset.name;
+    <div class="near-links">${ttBtn}${delayBtn}</div>
+    <div class="near-set-row">
+      <button class="secondary-btn" data-set="origin" data-name="${esc(main.name)}">出発地に設定</button>
+      <button class="secondary-btn" data-set="dest" data-name="${esc(main.name)}">目的地に設定</button>
+    </div>
+    ${others ? `<div class="near-others-label">${main.km != null ? '他の近隣駅' : 'マイ駅を切り替え'}</div><div class="near-others">${others}</div>` : ''}
+    <p class="demo-note" style="padding:2px 2px 4px">運行状況はJR西日本「列車走行位置」の実データ(方向別の走行本数・遅延)です。正確な始発・終電は公式時刻表でご確認ください(無料の時刻表データが無いためアプリ内には表示していません)。JR以外はリアルタイム情報がありません。</p>`;
+
+  $$('#near-body [data-set]').forEach(b => b.addEventListener('click', e => {
+    const t = e.currentTarget;
+    $(t.dataset.set === 'origin' ? '#input-origin' : '#input-dest').value = t.dataset.name;
     $('#near-modal').classList.add('hidden');
-    toast(`出発地を${e.target.dataset.name}に設定しました`);
-  });
+    if (currentTab() !== 'nav') switchTab('nav');
+    toast(`${t.dataset.set === 'origin' ? '出発地' : '目的地'}を${t.dataset.name}に設定しました`);
+  }));
   $$('#near-body .near-other').forEach(b => b.addEventListener('click', () => {
-    const s = near.find(x => x.name === b.dataset.name);
-    renderNearModal([s, ...near.filter(x => x.name !== s.name)]);
+    const all = [main, ...(related || [])];
+    const s = all.find(x => x.name === b.dataset.name);
+    renderStationCard(s, all.filter(x => x.name !== s.name));
   }));
 }
 
@@ -1421,6 +1500,7 @@ function init() {
 
   renderDelays();
   renderPassUI();
+  renderMyStations();
   updateHeader();
   loadFeedDelays();
 
