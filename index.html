@@ -177,6 +177,7 @@
           <svg viewBox="0 0 24 24" width="18" height="18"><circle cx="6" cy="12" r="2.4" fill="currentColor"/><circle cx="12" cy="12" r="2.4" fill="currentColor"/><circle cx="18" cy="12" r="2.4" fill="currentColor"/></svg>
           運行状況
         </button>
+        <span class="map-ctrl-sep"></span>
         <button id="btn-parking" class="map-ctrl wide">
           <svg viewBox="0 0 24 24" width="18" height="18"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 17V8h3.2a2.6 2.6 0 010 5.2H9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
           駐車場
@@ -254,11 +255,9 @@
         <div id="drive-logs"></div>
       </div>
       <div class="card menu-card">
-        <h2 class="card-title">メニュー</h2>
-        <button class="menu-item" id="menu-pass">
-          <span>フリーパス選択</span><span id="menu-pass-label" class="menu-value"></span>
-        </button>
+        <h2 class="card-title">設定</h2>
         <button class="menu-item" id="menu-clear-delays"><span>遅延情報をすべて削除</span></button>
+        <button class="menu-item" id="menu-clear-drive"><span>ドライブログをすべて削除</span></button>
         <button class="menu-item" id="menu-reset"><span>データを初期化</span></button>
       </div>
       <div class="card menu-card">

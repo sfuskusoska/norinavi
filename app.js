@@ -2002,7 +2002,6 @@ function renderPassUI() {
   const label = $('#pass-label');
   label.textContent = pass.id === 'none' ? 'フリーパスなし' : pass.name;
   label.classList.toggle('pass-on', pass.id !== 'none');
-  $('#menu-pass-label').textContent = pass.id === 'none' ? 'なし' : pass.name;
 
   $('#pass-list').innerHTML = PASSES.map(p => `
     <button class="pass-item ${p.id === cur ? 'selected' : ''} ${p.id !== 'none' && !p.covers.length ? 'outside' : ''}" data-id="${p.id}">
@@ -2267,21 +2266,24 @@ function init() {
   $('#near-modal').addEventListener('click', e => { if (e.target.id === 'near-modal') $('#near-modal').classList.add('hidden'); });
 
   $('#btn-pass').addEventListener('click', () => $('#pass-modal').classList.remove('hidden'));
-  $('#menu-pass').addEventListener('click', () => $('#pass-modal').classList.remove('hidden'));
   $('#pass-done').addEventListener('click', () => $('#pass-modal').classList.add('hidden'));
   $('#pass-modal').addEventListener('click', e => {
     if (e.target.id === 'pass-modal') $('#pass-modal').classList.add('hidden');
   });
 
-  // メニュー
+  // 設定
   $('#menu-clear-delays').addEventListener('click', () => {
     store.delays = [];
     renderDelays();
     toast('遅延情報をすべて削除しました');
   });
+  $('#menu-clear-drive').addEventListener('click', () => {
+    store.driveLogs = [];
+    renderDriveLogs();
+    toast('ドライブログをすべて削除しました');
+  });
   $('#menu-reset').addEventListener('click', () => {
-    localStorage.removeItem('nn_delays');
-    localStorage.removeItem('nn_pass');
+    ['nn_delays', 'nn_pass', 'nn_history', 'nn_alarm', 'nn_drivelogs'].forEach(k => localStorage.removeItem(k));
     location.reload();
   });
 
