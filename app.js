@@ -656,12 +656,13 @@ function legDirection(leg) {
 function searchPathRoute(points, mode, baseMin, timeType) {
   let km = 0;
   for (let i = 0; i < points.length - 1; i++) km += haversine(STATIONS[points[i]], STATIONS[points[i + 1]]);
-  km *= 1.25; // 実道路換算の概算係数
-  const speed = mode === 'bike' ? 15 : 4.8;
+  km *= (mode === 'car' ? 1.35 : 1.25); // 実道路換算の概算係数(車は道なりで長め)
+  const speed = mode === 'car' ? 28 : mode === 'bike' ? 15 : 4.8; // km/h(市街地平均の目安)
   const min = Math.max(1, Math.round(km / speed * 60));
-  const kcal = Math.round(km * (mode === 'bike' ? 25 : 50));
+  const kcal = mode === 'car' ? 0 : Math.round(km * (mode === 'bike' ? 25 : 50));
+  const fuel = mode === 'car' ? Math.round(km / 12 * 170) : 0; // 燃料概算: 12km/L・170円/L
   const dep = timeType === 'arr' ? baseMin - min : baseMin;
-  return { points, mode, km, min, kcal, dep, arr: dep + min };
+  return { points, mode, km, min, kcal, fuel, dep, arr: dep + min };
 }
 
 /* ================= Googleマップ連携 ================= */
@@ -669,12 +670,12 @@ function gmapsUrl(points, mode) {
   const enc = n => (isVirtual(n) && STATIONS[n])
     ? `${STATIONS[n].lat.toFixed(6)},${STATIONS[n].lng.toFixed(6)}`
     : encodeURIComponent(n + '駅');
-  if (mode === 'train') {
-    // transitモードは経由地パラメータ非対応のため、経由地ありはマルチストップ形式で開く
+  if (mode === 'train' || mode === 'bus') {
+    // 公共交通(電車・バス)はtransit。経由地パラメータ非対応のためマルチストップ形式で開く
     if (points.length > 2) return 'https://www.google.com/maps/dir/' + points.map(enc).join('/');
     return `https://www.google.com/maps/dir/?api=1&origin=${enc(points[0])}&destination=${enc(points[points.length - 1])}&travelmode=transit`;
   }
-  const tm = mode === 'bike' ? 'bicycling' : 'walking';
+  const tm = mode === 'car' ? 'driving' : mode === 'bike' ? 'bicycling' : 'walking';
   let url = `https://www.google.com/maps/dir/?api=1&origin=${enc(points[0])}&destination=${enc(points[points.length - 1])}&travelmode=${tm}`;
   const vias = points.slice(1, -1);
   if (vias.length) url += '&waypoints=' + vias.map(enc).join('%7C');
@@ -1131,6 +1132,10 @@ async function doSearch() {
     state.routes = routes;
     state.pathResult = null;
     renderResults();
+  } else if (state.mode === 'bus') {
+    state.pathResult = null;
+    state.routes = [];
+    renderResults();
   } else {
     state.pathResult = searchPathRoute(points, state.mode, baseMin, state.timeType);
     state.routes = [];
@@ -1210,6 +1215,7 @@ function renderResults() {
   }
 
   const list = $('#results-list');
+  if (mode === 'bus') { stopApproach(); list.className = ''; renderBusCard(list); return; }
   if (mode !== 'train') { stopApproach(); list.className = ''; renderPathCard(list); return; }
 
   if (state.resultView === 'board') { renderResultsBoard(list); return; }
@@ -1357,10 +1363,14 @@ function startApproach() {
 
 function renderPathCard(list) {
   const p = state.pathResult;
-  const label = p.mode === 'bike' ? '自転車' : '徒歩';
+  const isCar = p.mode === 'car';
+  const label = isCar ? '自動車' : p.mode === 'bike' ? '自転車' : '徒歩';
+  const cost = isCar
+    ? `<span>燃料 約${yen(p.fuel)}</span>`
+    : `<span>消費 約${p.kcal}kcal</span><span class="route-fare">¥0</span>`;
   list.innerHTML = `
     <div class="route-card" style="cursor:default">
-      <div class="route-tags"><span class="tag easy">${label}ルート</span></div>
+      <div class="route-tags"><span class="tag ${isCar ? 'cheap' : 'easy'}">${label}ルート</span></div>
       <div class="route-time-row">
         <span class="route-time">${fmtTime(p.dep)}</span>
         <span class="route-arrow">→</span>
@@ -1369,8 +1379,7 @@ function renderPathCard(list) {
       <div class="route-meta">
         <span>所要 ${fmtDur(p.min)}</span>
         <span>約${p.km.toFixed(1)}km</span>
-        <span>消費 約${p.kcal}kcal</span>
-        <span class="route-fare">¥0</span>
+        ${cost}
       </div>
       <div class="route-lines">
         ${p.points.map(esc).join(' <span style="color:#b9c6ba;font-weight:800">›</span> ')}
@@ -1379,10 +1388,49 @@ function renderPathCard(list) {
         <button class="secondary-btn" id="btn-path-map">地図で確認</button>
         <button class="gmap-btn" id="btn-path-gmap">Googleマップで開く</button>
       </div>
-      <p class="demo-note" style="margin-top:8px">※距離・時間は直線距離×1.25の概算です。実際のルートはGoogleマップでご確認ください。</p>
+      ${isCar ? `<div class="detail-actions" style="margin-top:8px">
+        <button class="secondary-btn" id="btn-car-park">目的地周辺の駐車場</button>
+        <button class="secondary-btn" id="btn-car-drive">ドライブログを記録</button>
+      </div>` : ''}
+      <p class="demo-note" style="margin-top:8px">※距離・時間・${isCar ? '燃料' : 'カロリー'}は直線距離×概算係数による目安です。${isCar ? '実際の道路ルート・有料道路はGoogleマップでご確認ください。' : '実際のルートはGoogleマップでご確認ください。'}</p>
     </div>`;
   $('#btn-path-map').addEventListener('click', () => { switchTab('map'); showPathOnMap(p); });
   $('#btn-path-gmap').addEventListener('click', openGmaps);
+  if (isCar) {
+    $('#btn-car-park').addEventListener('click', () => {
+      const dest = p.points[p.points.length - 1];
+      const c = STATIONS[dest];
+      switchTab('map');
+      if (c) { ensureMap(); map.setView([c.lat, c.lng], 15); }
+      setTimeout(() => toggleParking(), 300);
+    });
+    $('#btn-car-drive').addEventListener('click', () => switchTab('menu'));
+  }
+}
+
+/* バス: 路線・時刻の無料データが無いためアプリ内計算は不可。Google乗換へ連携＋近隣バス停 */
+function renderBusCard(list) {
+  const pts = state.lastSearch.points;
+  list.innerHTML = `
+    <div class="route-card" style="cursor:default">
+      <div class="route-tags"><span class="tag" style="background:#1ba5a5">バス</span></div>
+      <p style="font-size:13.5px;font-weight:700;line-height:1.6;margin:4px 0 10px">
+        ${esc(pts[0])} → ${esc(pts[pts.length - 1])}<br>
+        <span style="color:var(--ink-soft);font-size:12.5px;font-weight:600">バスの路線・時刻表データは無料で入手できないため、アプリ内ではバス経路を計算できません。Googleマップのバス経路でご確認ください。</span>
+      </p>
+      <div class="detail-actions">
+        <button class="gmap-btn" id="btn-bus-gmap" style="flex:1">Googleマップでバス経路を見る</button>
+      </div>
+      <button class="secondary-btn" id="btn-bus-stops" style="width:100%;margin-top:8px">周辺のバス停を地図で見る</button>
+      <p class="demo-note" style="margin-top:8px">※バス停の位置はOpenStreetMapの実データ、経路・時刻はGoogleマップ連携です。</p>
+    </div>`;
+  $('#btn-bus-gmap').addEventListener('click', openGmaps);
+  $('#btn-bus-stops').addEventListener('click', () => {
+    const o = STATIONS[pts[0]];
+    switchTab('map');
+    if (o) { ensureMap(); map.setView([o.lat, o.lng], 15); }
+    setTimeout(() => showBusStops(o), 300);
+  });
 }
 
 /* ================= 詳細描画 ================= */
@@ -1685,6 +1733,35 @@ function drawParking(list, center) {
     if (e.target.closest('a')) return;
     map.setView([+r.dataset.lat, +r.dataset.lng], 17);
   }));
+}
+
+/* ===== 近隣バス停(OpenStreetMap Overpass) ===== */
+let busLayer = null;
+async function showBusStops(center) {
+  ensureMap();
+  const c = center || map.getCenter();
+  toast('周辺のバス停を検索中…');
+  const q = `[out:json][timeout:20];(node["highway"="bus_stop"](around:900,${c.lat},${c.lng});node["amenity"="bus_station"](around:900,${c.lat},${c.lng}););out 80;`;
+  let data = null;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(q) });
+    if (res.ok) data = await res.json();
+  } catch {}
+  if (!data) { toast('バス停情報を取得できませんでした'); return; }
+  if (busLayer) map.removeLayer(busLayer);
+  busLayer = L.layerGroup().addTo(map);
+  const stops = (data.elements || []).filter(e => e.lat);
+  for (const s of stops) {
+    const t = s.tags || {};
+    const icon = L.divIcon({ className: 'bus-pin', html: '🚏', iconSize: [22, 22] });
+    L.marker([s.lat, s.lon], { icon }).addTo(busLayer)
+      .bindPopup(`<b>${esc(t.name || 'バス停')}</b>${t.operator ? '<br>' + esc(t.operator) : ''}`);
+  }
+  const leg = $('#parking-legend');
+  leg.classList.remove('hidden');
+  leg.innerHTML = `<span>🚏 周辺のバス停 ${stops.length}件</span><span class="src">OpenStreetMap・時刻はGoogle/各社で確認</span><button id="pk-clear">×</button>`;
+  $('#pk-clear').addEventListener('click', () => { if (busLayer) { map.removeLayer(busLayer); busLayer = null; } leg.classList.add('hidden'); });
+  toast(`周辺のバス停 ${stops.length}件を表示しました`);
 }
 
 /* ===== JR走行位置(路線図・リアルタイム) ===== */
