@@ -2354,6 +2354,18 @@ function init() {
   loadFeedDelays();
   if (store.alarm && STATIONS[store.alarm]) armAlarm(store.alarm); // 移動中のリロードでも再開
 
+  // ドライブタブのハブ
+  $('#drive-route').addEventListener('click', () => {
+    switchTab('nav'); showScreen('search');
+    state.mode = 'car';
+    $$('.mode-btn').forEach(x => x.classList.toggle('on', x.dataset.mode === 'car'));
+    toast('移動手段を「自動車」にしました。出発地・目的地を入れて検索してください');
+  });
+  $('#drive-parking').addEventListener('click', () => {
+    switchTab('map');
+    setTimeout(() => { if (!parkingOn) toggleParking(); }, 350);
+  });
+
   // ドライブログ
   $('#drive-toggle').addEventListener('click', () => drive.recording ? stopDrive() : startDrive());
   $('#drive-hwy').addEventListener('click', () => { drive.hwy = !drive.hwy; renderDrivePanel(); });
