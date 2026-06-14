@@ -1629,28 +1629,62 @@ function clearParking() {
   parkingOn = false;
   if (parkingLayer) { map.removeLayer(parkingLayer); parkingLayer = null; }
   $('#parking-legend').classList.add('hidden');
+  $('#parking-panel').classList.add('hidden');
   $('#btn-parking').classList.remove('on');
 }
 
 function drawParking(list, center) {
   if (parkingLayer) map.removeLayer(parkingLayer);
   parkingLayer = L.layerGroup().addTo(map);
-  for (const p of list) {
-    const dist = haversine(center, p);
-    const icon = L.divIcon({ className: 'pk-pin', html: 'P', iconSize: [22, 22] });
-    const m = L.marker([p.lat, p.lng], { icon }).addTo(parkingLayer);
-    const gmap = `https://www.google.com/maps/dir/?api=1&destination=${p.lat.toFixed(6)},${p.lng.toFixed(6)}&travelmode=driving`;
-    m.bindPopup(
-      `<b>${esc(p.name)}</b><br>` +
+  // 近い順に並べてランク付け
+  list.forEach(p => { p._d = haversine(center, p); });
+  list.sort((a, b) => a._d - b._d);
+
+  list.forEach((p, i) => {
+    const gnav = `https://www.google.com/maps/dir/?api=1&destination=${p.lat.toFixed(6)},${p.lng.toFixed(6)}&travelmode=driving`;
+    const gprice = `https://www.google.com/maps/search/?api=1&query=${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+    const icon = L.divIcon({ className: 'pk-pin', html: (i + 1), iconSize: [22, 22] });
+    L.marker([p.lat, p.lng], { icon }).addTo(parkingLayer).bindPopup(
+      `<b>${i + 1}. ${esc(p.name)}</b><br>` +
       `${p.cap ? '収容 ' + esc(p.cap) + '台 ・ ' : ''}${p.fee ? esc(p.fee) : '料金不明'}<br>` +
-      `${p.charge ? esc(p.charge) + '<br>' : ''}` +
-      `約${(dist * 1000).toFixed(0)}m ・ <a href="${gmap}" target="_blank" rel="noopener">ここへナビ(Google)</a>`
+      `約${(p._d * 1000).toFixed(0)}m<br>` +
+      `<a href="${gprice}" target="_blank" rel="noopener">料金を確認(Google)</a> ・ <a href="${gnav}" target="_blank" rel="noopener">ここへナビ</a>`
     );
-  }
+  });
+
   const leg = $('#parking-legend');
   leg.classList.remove('hidden');
-  leg.innerHTML = `<span><b>P</b> 周辺の駐車場 ${list.length}件</span><span class="src">OpenStreetMap・満空/予約は非対応</span><button id="pk-clear">×</button>`;
+  leg.innerHTML = `<span><b>P</b> 周辺の駐車場 ${list.length}件(近い順)</span><span class="src">OpenStreetMap・料金/満空は各リンクで確認</span><button id="pk-clear">×</button>`;
   $('#pk-clear').addEventListener('click', clearParking);
+
+  // 近い順ランキングのパネル
+  const gArea = `https://www.google.com/maps/search/コインパーキング/@${center.lat.toFixed(5)},${center.lng.toFixed(5)},16z`;
+  const rows = list.slice(0, 20).map((p, i) => {
+    const gprice = `https://www.google.com/maps/search/?api=1&query=${p.lat.toFixed(6)},${p.lng.toFixed(6)}`;
+    return `<div class="pk-row" data-lat="${p.lat}" data-lng="${p.lng}">
+      <span class="pk-rank">${i + 1}</span>
+      <span class="pk-info"><b>${esc(p.name)}</b><span class="pk-sub">${(p._d * 1000).toFixed(0)}m${p.cap ? ' ・ ' + esc(p.cap) + '台' : ''}${p.fee ? ' ・ ' + esc(p.fee) : ''}</span></span>
+      <a class="pk-link" href="${gprice}" target="_blank" rel="noopener">料金</a>
+    </div>`;
+  }).join('');
+  const panel = $('#parking-panel');
+  panel.classList.remove('hidden');
+  panel.innerHTML = `
+    <div class="pk-head">
+      <span>周辺の駐車場(近い順 ${list.length}件)</span>
+      <button id="pk-panel-close">×</button>
+    </div>
+    <div class="pk-compare">
+      <a class="pk-cbtn" href="${gArea}" target="_blank" rel="noopener">Googleで料金を比較</a>
+      <a class="pk-cbtn alt" href="https://pppark.com/" target="_blank" rel="noopener">PPParkで探す</a>
+    </div>
+    <div class="pk-note">料金の安い順はPPPark等の有料データが必要なため、近い順で表示し料金は各リンクで確認できます。</div>
+    <div class="pk-list">${rows}</div>`;
+  $('#pk-panel-close').addEventListener('click', clearParking);
+  $$('#parking-panel .pk-row').forEach(r => r.addEventListener('click', e => {
+    if (e.target.closest('a')) return;
+    map.setView([+r.dataset.lat, +r.dataset.lng], 17);
+  }));
 }
 
 /* ===== JR走行位置(路線図・リアルタイム) ===== */
