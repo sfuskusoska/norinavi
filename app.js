@@ -55,7 +55,9 @@ const store = {
   get theme() { return localStorage.getItem('nn_theme') || 'light'; },
   set theme(v) { localStorage.setItem('nn_theme', v); },
   get mapStyle() { return localStorage.getItem('nn_mapstyle') || 'pale'; },
-  set mapStyle(v) { localStorage.setItem('nn_mapstyle', v); }
+  set mapStyle(v) { localStorage.setItem('nn_mapstyle', v); },
+  get parked() { try { return JSON.parse(localStorage.getItem('nn_parked') || 'null'); } catch { return null; } },
+  set parked(v) { v ? localStorage.setItem('nn_parked', JSON.stringify(v)) : localStorage.removeItem('nn_parked'); }
 };
 
 /* テーマ(ライト/ダーク) */
@@ -919,7 +921,9 @@ function renderAlarmBar() {
 }
 
 /* ================= 本日のドライブログ(走行記録＋ETC概算) ================= */
-const drive = { recording: false, watchId: null, track: [], startTs: 0, dist: 0, hwyDist: 0, hwy: false, lastPt: null, vehicle: 'normal' };
+const drive = { recording: false, watchId: null, track: [], startTs: 0, dist: 0, hwyDist: 0, hwy: false, lastPt: null, vehicle: 'normal',
+  maxSpeed: 0, harsh: 0, lastSpeed: 0, lastSpeedTs: 0, breakAt: 0 };
+const BREAK_INTERVAL = 2 * 3600 * 1000; // 2時間ごとに休憩リマインダー
 // ETC/高速料金の概算: 本線24.6円/km + ターミナル150円(税込・普通車の目安)。正確値はNEXCO等の有料データが必要
 const ETC_RATE = 24.6, ETC_TERMINAL = 150;
 const VEHICLE = { light: { label: '軽', f: 0.8 }, normal: { label: '普通車', f: 1.0 }, medium: { label: '中型', f: 1.2 }, large: { label: '大型', f: 1.65 } };
@@ -934,6 +938,7 @@ function startDrive() {
   if (!navigator.geolocation) { toast('位置情報が使えない端末です'); return; }
   drive.recording = true; drive.track = []; drive.dist = 0; drive.hwyDist = 0;
   drive.hwy = false; drive.lastPt = null; drive.startTs = Date.now();
+  drive.maxSpeed = 0; drive.harsh = 0; drive.lastSpeed = 0; drive.lastSpeedTs = Date.now(); drive.breakAt = Date.now() + BREAK_INTERVAL;
   drive.vehicle = $('#drive-vehicle').value;
   drive.watchId = navigator.geolocation.watchPosition(onDrivePos,
     () => {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 25000 });
@@ -942,19 +947,50 @@ function startDrive() {
 }
 
 function onDrivePos(pos) {
-  const p = { lat: pos.coords.latitude, lng: pos.coords.longitude, t: Date.now(), hwy: drive.hwy };
+  const now = Date.now();
+  const p = { lat: pos.coords.latitude, lng: pos.coords.longitude, t: now, hwy: drive.hwy };
   if (drive.lastPt) {
     const d = haversine(drive.lastPt, p); // km
     if (d > 0.003) { // 3m未満のブレは無視
       drive.dist += d;
       if (drive.hwy) drive.hwyDist += d;
       drive.track.push(p);
+      // 速度(km/h)を算出。GPS由来があればそれを優先
+      const dtH = Math.max(0.0003, (now - (drive.lastPt.t || now)) / 3600000);
+      const spd = pos.coords.speed != null && pos.coords.speed >= 0 ? pos.coords.speed * 3.6 : d / dtH;
+      if (spd < 200) { // 異常値は除外
+        drive.maxSpeed = Math.max(drive.maxSpeed, spd);
+        const dtS = (now - (drive.lastSpeedTs || now)) / 1000;
+        if (dtS > 0 && dtS < 6) {
+          const accel = (spd - drive.lastSpeed) / dtS; // km/h 毎秒
+          if (Math.abs(accel) >= 12) drive.harsh++; // 急加速/急減速
+        }
+        drive.lastSpeed = spd; drive.lastSpeedTs = now;
+      }
       drive.lastPt = p;
     }
   } else {
     drive.lastPt = p; drive.track.push(p);
   }
+  // 休憩リマインダー(連続運転2時間ごと)
+  if (now >= drive.breakAt) {
+    drive.breakAt = now + BREAK_INTERVAL;
+    if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+    if ('Notification' in window && Notification.permission === 'granted') {
+      try { new Notification('そろそろ休憩を', { body: '運転を始めて約2時間です。安全のため休憩しましょう。', icon: 'icon-192.png' }); } catch {}
+    }
+    toast('運転2時間が経過。安全のため休憩を(SA/PAはドライブタブから探せます)');
+  }
   renderDrivePanel();
+}
+
+// GPS速度・急操作から安全運転スコア(0〜100の目安)を算出
+function safetyScore() {
+  const hours = Math.max(0.1, (Date.now() - drive.startTs) / 3600000);
+  const harshPer = drive.harsh / hours;        // 1時間あたりの急加減速
+  const overPenalty = drive.maxSpeed > 120 ? 15 : drive.maxSpeed > 100 ? 8 : 0;
+  let s = 100 - harshPer * 4 - overPenalty;
+  return Math.max(0, Math.min(100, Math.round(s)));
 }
 
 function stopDrive() {
@@ -965,6 +1001,7 @@ function stopDrive() {
       id: Date.now(), ts: drive.startTs, end: Date.now(),
       dist: +drive.dist.toFixed(2), hwyDist: +drive.hwyDist.toFixed(2),
       vehicle: drive.vehicle, etc: etcEstimate(drive.hwyDist, drive.vehicle),
+      score: safetyScore(), maxSpeed: Math.round(drive.maxSpeed), harsh: drive.harsh,
       track: decimate(drive.track, 200)
     };
     store.driveLogs = [log, ...store.driveLogs].slice(0, 50);
@@ -1021,9 +1058,11 @@ function renderDriveLogs() {
   } else {
     html += logs.slice(0, 10).map(l => {
       const d = new Date(l.ts);
+      const sc = l.score != null
+        ? `<span class="dl-score ${l.score >= 80 ? 'good' : l.score >= 60 ? 'mid' : 'bad'}">安全運転 ${l.score}点</span>` : '';
       return `<div class="drive-log" data-id="${l.id}">
         <div class="dl-body">
-          <div class="dl-head">${d.getMonth() + 1}/${d.getDate()} ${fmtTime(d.getHours() * 60 + d.getMinutes())} ・ ${(VEHICLE[l.vehicle] || VEHICLE.normal).label}</div>
+          <div class="dl-head">${d.getMonth() + 1}/${d.getDate()} ${fmtTime(d.getHours() * 60 + d.getMinutes())} ・ ${(VEHICLE[l.vehicle] || VEHICLE.normal).label} ${sc}</div>
           <div class="dl-meta">${l.dist.toFixed(1)}km(高速${l.hwyDist.toFixed(1)}km) ・ ${fmtDur2(l.end - l.ts)} ・ ETC概算 ${yen(l.etc)}</div>
         </div>
         <button class="dl-map" data-id="${l.id}">地図</button>
@@ -1053,6 +1092,77 @@ function showDriveTrack(track) {
   fitMap(L.latLngBounds(track));
   $('#map-route-info').innerHTML = '走行ログを表示中';
   $('#map-route-info').classList.remove('hidden');
+}
+
+/* ===== 駐車位置メモ ===== */
+function saveParked() {
+  if (!navigator.geolocation) { toast('位置情報が使えない端末です'); return; }
+  toast('現在地を取得中…');
+  navigator.geolocation.getCurrentPosition(pos => {
+    store.parked = { lat: pos.coords.latitude, lng: pos.coords.longitude, ts: Date.now() };
+    renderParkStatus();
+    toast('駐車位置を保存しました');
+  }, () => toast('位置情報を取得できませんでした。許可設定を確認してください'),
+    { enableHighAccuracy: true, timeout: 8000, maximumAge: 5000 });
+}
+
+function renderParkStatus() {
+  const el = $('#park-status');
+  if (!el) return;
+  const p = store.parked;
+  if (!p) { el.innerHTML = '<p class="card-sub" style="margin:0 0 10px">保存された駐車位置はありません。</p>'; return; }
+  const d = new Date(p.ts);
+  const gmap = `https://www.google.com/maps/dir/?api=1&destination=${p.lat.toFixed(6)},${p.lng.toFixed(6)}&travelmode=walking`;
+  el.innerHTML = `
+    <div class="park-saved">
+      <div>📍 ${d.getMonth() + 1}/${d.getDate()} ${fmtTime(d.getHours() * 60 + d.getMinutes())} に保存</div>
+      <div class="park-acts">
+        <button class="secondary-btn" id="park-map">地図で見る</button>
+        <a class="gmap-btn" href="${gmap}" target="_blank" rel="noopener">歩いて戻る(Google)</a>
+        <button class="secondary-btn" id="park-clear">クリア</button>
+      </div>
+    </div>`;
+  $('#park-map').addEventListener('click', () => {
+    switchTab('map'); ensureMap();
+    routeGroup.clearLayers();
+    L.marker([p.lat, p.lng], { icon: L.divIcon({ className: 'pk-pin', html: 'P', iconSize: [24, 24] }) })
+      .addTo(routeGroup).bindPopup('駐車位置').openPopup();
+    map.setView([p.lat, p.lng], 17);
+    setTimeout(() => map.invalidateSize(), 60);
+  });
+  $('#park-clear').addEventListener('click', () => { store.parked = null; renderParkStatus(); toast('駐車位置をクリアしました'); });
+}
+
+/* ===== 休憩できる場所(SA/PA・道の駅)= OpenStreetMap Overpass ===== */
+async function showRestSpots() {
+  switchTab('map'); ensureMap();
+  const c = map.getCenter();
+  toast('休憩できる場所を検索中…');
+  const q = `[out:json][timeout:20];(node["highway"="services"](around:8000,${c.lat},${c.lng});way["highway"="services"](around:8000,${c.lat},${c.lng});node["highway"="rest_area"](around:8000,${c.lat},${c.lng});way["highway"="rest_area"](around:8000,${c.lat},${c.lng});node["amenity"="parking"]["name"~"道の駅"](around:8000,${c.lat},${c.lng}););out center 60;`;
+  let data = null;
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(q) });
+    if (res.ok) data = await res.json();
+  } catch {}
+  if (!data) { toast('休憩スポットを取得できませんでした'); return; }
+  if (parkingLayer) map.removeLayer(parkingLayer);
+  parkingLayer = L.layerGroup().addTo(map);
+  const spots = (data.elements || []).map(e => {
+    const t = e.tags || {};
+    const pt = e.type === 'node' ? { lat: e.lat, lng: e.lon } : (e.center ? { lat: e.center.lat, lng: e.center.lon } : null);
+    return pt ? { lat: pt.lat, lng: pt.lng, name: t.name || (t.highway === 'services' ? 'SA/PA' : t.highway === 'rest_area' ? 'PA・休憩所' : '休憩スポット') } : null;
+  }).filter(Boolean);
+  for (const s of spots) {
+    const gnav = `https://www.google.com/maps/dir/?api=1&destination=${s.lat.toFixed(6)},${s.lng.toFixed(6)}&travelmode=driving`;
+    L.marker([s.lat, s.lng], { icon: L.divIcon({ className: 'rest-pin', html: '☕', iconSize: [24, 24] }) })
+      .addTo(parkingLayer)
+      .bindPopup(`<b>${esc(s.name)}</b><br>約${(haversine(c, s) * 1000).toFixed(0)}m<br><a href="${gnav}" target="_blank" rel="noopener">ここへナビ</a>`);
+  }
+  const leg = $('#parking-legend');
+  leg.classList.remove('hidden');
+  leg.innerHTML = `<span>☕ 休憩できる場所 ${spots.length}件</span><span class="src">SA/PA・休憩所(OpenStreetMap)</span><button id="pk-clear">×</button>`;
+  $('#pk-clear').addEventListener('click', clearParking);
+  toast(spots.length ? `休憩できる場所 ${spots.length}件を表示` : '近くにSA/PA等が見つかりませんでした');
 }
 
 /* ================= 住所・地名のジオコーディング(OpenStreetMap Nominatim・無料) ================= */
@@ -2330,7 +2440,7 @@ function init() {
     toast('ドライブログをすべて削除しました');
   });
   $('#menu-reset').addEventListener('click', () => {
-    ['nn_delays', 'nn_pass', 'nn_history', 'nn_alarm', 'nn_drivelogs', 'nn_theme', 'nn_mapstyle', 'nn_lastinputs'].forEach(k => localStorage.removeItem(k));
+    ['nn_delays', 'nn_pass', 'nn_history', 'nn_alarm', 'nn_drivelogs', 'nn_theme', 'nn_mapstyle', 'nn_lastinputs', 'nn_parked'].forEach(k => localStorage.removeItem(k));
     location.reload();
   });
 
@@ -2365,6 +2475,9 @@ function init() {
     switchTab('map');
     setTimeout(() => { if (!parkingOn) toggleParking(); }, 350);
   });
+  $('#drive-rest').addEventListener('click', () => setTimeout(showRestSpots, 100));
+  $('#park-save').addEventListener('click', saveParked);
+  renderParkStatus();
 
   // ドライブログ
   $('#drive-toggle').addEventListener('click', () => drive.recording ? stopDrive() : startDrive());

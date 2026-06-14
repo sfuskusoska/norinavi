@@ -238,14 +238,41 @@
 
     <!-- ========== ドライブタブ ========== -->
     <section id="tab-drive" class="tab-page">
+      <!-- 俯瞰イラスト枠: 画像を差し替える場合は img/drive-hero.png 等を置いてください -->
+      <div class="drive-hero">
+        <img id="drive-hero-img" src="img/drive-hero.png" alt="" onerror="this.style.display='none';document.getElementById('drive-hero-svg').style.display='block'">
+        <svg id="drive-hero-svg" viewBox="0 0 400 150" xmlns="http://www.w3.org/2000/svg" style="display:none">
+          <rect width="400" height="150" fill="#d9ead0"/>
+          <circle cx="55" cy="34" r="16" fill="#bcd9a8"/><circle cx="80" cy="26" r="11" fill="#bcd9a8"/><circle cx="350" cy="120" r="18" fill="#bcd9a8"/><circle cx="372" cy="108" r="12" fill="#bcd9a8"/>
+          <rect x="300" y="20" width="34" height="26" rx="3" fill="#cfe0ef"/><rect x="40" y="100" width="30" height="30" rx="3" fill="#cfe0ef"/>
+          <path d="M-10 120 C 120 80, 200 120, 410 30" fill="none" stroke="#9aa7a0" stroke-width="34"/>
+          <path d="M-10 120 C 120 80, 200 120, 410 30" fill="none" stroke="#ffffff" stroke-width="2.5" stroke-dasharray="10 12"/>
+          <g transform="translate(196,96) rotate(-24)">
+            <rect x="-15" y="-9" width="30" height="18" rx="5" fill="#067a46"/>
+            <rect x="3" y="-7" width="9" height="14" rx="2" fill="#bfe0cf"/>
+            <rect x="-11" y="-6" width="7" height="12" rx="2" fill="#9ccdb4"/>
+            <circle cx="13" cy="0" r="1.6" fill="#fff"/>
+          </g>
+        </svg>
+      </div>
       <div class="card drive-hub">
         <h2 class="card-title">
           <svg viewBox="0 0 24 24" width="19" height="19"><path d="M5 11l1.5-4.5A2 2 0 018.4 5h7.2a2 2 0 011.9 1.5L19 11m-14 0h14a2 2 0 012 2v4h-2.5M5 11a2 2 0 00-2 2v4h2.5m0 0a1.5 1.5 0 003 0m-3 0h3m8.5 0a1.5 1.5 0 003 0m-3 0h3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
           ドライブ
         </h2>
-        <p class="card-sub">車での移動に関する機能をまとめています。</p>
+        <p class="card-sub">車での移動に関する機能をまとめています。焦りやすい高速も、休憩場所が分かれば心に余裕を。</p>
         <button id="drive-route" class="primary-btn small">車でルート検索</button>
         <button id="drive-parking" class="secondary-btn" style="width:100%;margin-top:8px">周辺の駐車場を探す</button>
+        <button id="drive-rest" class="secondary-btn" style="width:100%;margin-top:8px">休憩できる場所(SA/PA・道の駅)</button>
+      </div>
+      <div class="card park-card">
+        <h2 class="card-title">
+          <svg viewBox="0 0 24 24" width="19" height="19"><path d="M12 2a7 7 0 00-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 00-7-7z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9.5 13V7h3a2 2 0 010 4H9.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          駐車位置メモ
+        </h2>
+        <p class="card-sub">停めた場所をGPSで記録。戻るときに地図やGoogleナビで案内します。</p>
+        <div id="park-status"></div>
+        <button id="park-save" class="primary-btn small">今いる場所を駐車位置に保存</button>
       </div>
       <div class="card drive-card">
         <h2 class="card-title">
