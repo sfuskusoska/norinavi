@@ -1923,6 +1923,110 @@ async function showBusStops(center) {
   toast(`周辺のバス停 ${stops.length}件を表示しました`);
 }
 
+/* Overpass問い合わせ(混雑/レート制限に備え複数ミラーへフォールバック) */
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://maps.mail.ru/osm/tools/overpass/api/interpreter'
+];
+async function overpassFetch(query) {
+  for (const ep of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetch(ep, { method: 'POST', body: 'data=' + encodeURIComponent(query) });
+      if (!res.ok) continue;
+      const ct = res.headers.get('content-type') || '';
+      if (!ct.includes('json')) continue; // レート制限時のHTML応答などをスキップ
+      const data = await res.json();
+      if (data && Array.isArray(data.elements)) return data;
+    } catch { /* 次のミラーへ */ }
+  }
+  return null;
+}
+
+/* ===== 観光・景観スポット(OpenStreetMap Overpass) ===== */
+let touristLayer = null;
+// OSMタグ → アイコン・ラベル(意味のある観光/景観のみ。宿泊・小さな碑/墓などは除外=null)
+const TOUR_EXCLUDE_TOURISM = ['hotel', 'guest_house', 'hostel', 'motel', 'apartment', 'information', 'camp_site', 'caravan_site', 'chalet', 'love_hotel', 'wilderness_hut', 'alpine_hut'];
+const TOUR_EXCLUDE_HISTORIC = ['memorial', 'monument', 'boundary_stone', 'milestone', 'wayside_cross', 'wayside_shrine', 'tomb', 'grave', 'charcoal_pile', 'cannon'];
+function touristKind(t) {
+  if (TOUR_EXCLUDE_TOURISM.includes(t.tourism)) return null;
+  if (TOUR_EXCLUDE_HISTORIC.includes(t.historic)) return null;
+  if (t.tourism === 'viewpoint') return { e: '🌄', l: '景観・展望' };
+  if (t.natural === 'peak') return { e: '⛰', l: '山頂・景観' };
+  if (t.natural === 'waterfall' || t.waterway === 'waterfall') return { e: '💧', l: '滝' };
+  if (t.historic === 'castle' || t.castle_type) return { e: '🏯', l: '城' };
+  if (t.tourism === 'museum') return { e: '🏛', l: '博物館' };
+  if (t.tourism === 'gallery') return { e: '🖼', l: '美術館' };
+  if (t.tourism === 'theme_park') return { e: '🎢', l: '遊園地' };
+  if (t.tourism === 'zoo') return { e: '🦁', l: '動物園' };
+  if (t.tourism === 'aquarium') return { e: '🐟', l: '水族館' };
+  if (t.leisure === 'garden') return { e: '🌸', l: '庭園' };
+  if (t.leisure === 'park') return { e: '🌳', l: '公園' };
+  if (t.amenity === 'place_of_worship') return { e: '⛩', l: '神社・寺' };
+  if (t.historic) return { e: '🗿', l: '史跡' };
+  if (t.tourism === 'attraction') return { e: '🎡', l: '観光' };
+  if (t.tourism) return { e: '📍', l: '観光' };
+  return null; // 観光・景観に該当しないものは表示しない
+}
+
+async function showTouristSpots() {
+  switchTab('map'); ensureMap();
+  const c = map.getCenter();
+  const b = map.getBounds();
+  // 半径は表示範囲に合わせる(密集地で重くなりすぎない上限)
+  const radius = Math.min(6000, Math.max(2000, Math.round(haversine({ lat: c.lat, lng: c.lng }, { lat: b.getNorth(), lng: b.getEast() }) * 1000)));
+  toast('観光・景観スポットを検索中…(数秒〜十数秒)');
+  // 主要種別に絞ったクエリ(点はnode中心、公園/庭園のみエリア=wayも取得)で高速化
+  const a = `(around:${radius},${c.lat},${c.lng})`;
+  // 高負荷の公開サーバでも安定するようnode中心の軽量クエリにする
+  const q = `[out:json][timeout:20];(` +
+    `node["tourism"~"attraction|viewpoint|museum|gallery|theme_park|zoo|aquarium"]["name"]${a};` +
+    `node["historic"~"castle|ruins|archaeological"]["name"]${a};` +
+    `node["natural"~"peak|waterfall"]["name"]${a};` +
+    `node["leisure"~"park|garden"]["name"]${a};` +
+    `node["amenity"="place_of_worship"]["name"]["wikidata"]${a};` +
+    `);out 100;`;
+  const data = await overpassFetch(q);
+  if (!data) { toast('観光スポットを取得できませんでした(混雑の可能性・時間をおいて再試行)'); return; }
+  // 公園・庭園などエリア(way)も best-effort で追加(取得できなければスキップ)
+  overpassFetch(`[out:json][timeout:15];(way["leisure"~"park|garden"]["name"]${a};way["historic"="castle"]["name"]${a};way["tourism"~"museum|attraction|zoo"]["name"]${a};);out center 40;`)
+    .then(extra => { if (extra && extra.elements.length) addTouristMarkers(extra.elements, c); }).catch(() => {});
+  if (touristLayer) map.removeLayer(touristLayer);
+  touristLayer = L.layerGroup().addTo(map);
+  touristSeen = new Set();
+  touristCount = 0;
+  addTouristMarkers(data.elements || [], c);
+  $('#parking-legend').classList.remove('hidden');
+  renderTouristLegend();
+  toast(touristCount ? `観光・景観スポット ${touristCount}件を表示` : 'この範囲に観光スポットが見つかりませんでした');
+}
+
+let touristSeen = new Set();
+let touristCount = 0;
+function addTouristMarkers(elements, c) {
+  if (!touristLayer) return;
+  for (const el of elements) {
+    const t = el.tags || {};
+    if (!t.name || touristSeen.has(t.name)) continue;
+    const k = touristKind(t);
+    if (!k) continue; // 観光・景観に該当しないものは除外
+    const pt = el.type === 'node' ? { lat: el.lat, lng: el.lon } : (el.center ? { lat: el.center.lat, lng: el.center.lon } : null);
+    if (!pt) continue;
+    touristSeen.add(t.name); touristCount++;
+    const g = `https://www.google.com/maps/search/?api=1&query=${pt.lat.toFixed(6)},${pt.lng.toFixed(6)}`;
+    L.marker([pt.lat, pt.lng], { icon: L.divIcon({ className: 'tour-pin', html: k.e, iconSize: [26, 26] }) })
+      .addTo(touristLayer)
+      .bindPopup(`<b>${esc(t.name)}</b><br>${esc(k.l)} ・ 約${(haversine(c, pt) * 1000).toFixed(0)}m<br><a href="${g}" target="_blank" rel="noopener">Googleで見る・行く</a>`);
+  }
+  renderTouristLegend();
+}
+function renderTouristLegend() {
+  const leg = $('#parking-legend');
+  if (!leg || leg.classList.contains('hidden')) return;
+  leg.innerHTML = `<span>🌄 観光・景観スポット ${touristCount}件</span><span class="src">OpenStreetMap・地図を動かして再検索</span><button id="pk-clear">×</button>`;
+  $('#pk-clear').addEventListener('click', () => { if (touristLayer) { map.removeLayer(touristLayer); touristLayer = null; } leg.classList.add('hidden'); });
+}
+
 /* ===== JR走行位置(路線図・リアルタイム) ===== */
 const jrMasterCache = {};
 async function fetchJRMaster(api) {
@@ -2411,6 +2515,7 @@ function init() {
   $('#btn-jr-live').addEventListener('click', openJRLive);
   $('#btn-rail-status').addEventListener('click', toggleRailStatus);
   $('#btn-parking').addEventListener('click', toggleParking);
+  $('#btn-tourist').addEventListener('click', () => setTimeout(showTouristSpots, 100));
   $('#jr-done').addEventListener('click', () => { $('#jr-modal').classList.add('hidden'); stopJRTimer(); });
   $('#jr-modal').addEventListener('click', e => { if (e.target.id === 'jr-modal') { $('#jr-modal').classList.add('hidden'); stopJRTimer(); } });
 
