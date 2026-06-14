@@ -1534,9 +1534,11 @@ let map = null, routeGroup = null;
 function ensureMap() {
   if (map) return;
   map = L.map('map', { zoomControl: false }).setView([34.70, 135.50], 11);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-    maxZoom: 19
+  // 地図タイルは国土地理院(地理院タイル・淡色)を使用(無料・公式・日本特化)。
+  // OSM公開タイルサーバの直叩きは利用規約上ヘビーユース不可のため避ける。
+  L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+    attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル(国土地理院)</a>',
+    maxZoom: 18
   }).addTo(map);
   for (const line of LINES) {
     const pts = line.stations.map(n => [STATIONS[n].lat, STATIONS[n].lng]);
