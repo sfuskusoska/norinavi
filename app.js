@@ -51,8 +51,19 @@ const store = {
   get alarm() { return localStorage.getItem('nn_alarm') || ''; },
   set alarm(v) { v ? localStorage.setItem('nn_alarm', v) : localStorage.removeItem('nn_alarm'); },
   get driveLogs() { try { return JSON.parse(localStorage.getItem('nn_drivelogs') || '[]'); } catch { return []; } },
-  set driveLogs(v) { localStorage.setItem('nn_drivelogs', JSON.stringify(v)); }
+  set driveLogs(v) { localStorage.setItem('nn_drivelogs', JSON.stringify(v)); },
+  get theme() { return localStorage.getItem('nn_theme') || 'light'; },
+  set theme(v) { localStorage.setItem('nn_theme', v); },
+  get mapStyle() { return localStorage.getItem('nn_mapstyle') || 'pale'; },
+  set mapStyle(v) { localStorage.setItem('nn_mapstyle', v); }
 };
+
+/* テーマ(ライト/ダーク) */
+function applyTheme(t) {
+  document.body.classList.toggle('dark', t === 'dark');
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', t === 'dark' ? '#0c8a50' : '#04532f');
+}
 
 const MAX_HISTORY = 8;
 // 検索した地点名を履歴の先頭に積む(駅名・住所・現在地)
@@ -1116,6 +1127,14 @@ async function doSearch() {
   const points = await resolvePoints();
   if (!points) return;
   recordHistory(points); // 検索履歴に記録
+  try {
+    localStorage.setItem('nn_lastinputs', JSON.stringify({
+      origin: $('#input-origin').value.trim(),
+      dest: $('#input-dest').value.trim(),
+      vias: $$('.via-input').map(i => i.value.trim()).filter(Boolean),
+      mode: state.mode
+    }));
+  } catch {}
   const baseMin = baseMinutes();
   const dateStr = $('#input-date').value;
   state.lastSearch = { points, mode: state.mode, baseMin, timeType: state.timeType, dateStr };
@@ -1476,7 +1495,11 @@ function renderDetail() {
       rows.push(stationRow(stName, cls, `${fmtTime(leg.depTime)}`, '発'));
     } else {
       const prevArr = r.legs[i - 1].arrTime;
-      rows.push(stationRow(stName, cls, fmtTime(prevArr), `発 ${fmtTime(leg.depTime)}`, vias.has(stName)));
+      const wait = Math.max(0, leg.depTime - prevArr);
+      // 電車→電車の乗り換えのときだけ「のりかえ◯分」を表示(徒歩連絡は除く)
+      const isTransfer = r.legs[i - 1].lineId !== 'WALK' && leg.lineId !== 'WALK';
+      rows.push(stationRow(stName, cls, fmtTime(prevArr), `発 ${fmtTime(leg.depTime)}`,
+        { via: vias.has(stName), transfer: isTransfer ? wait : null }));
     }
     if (leg.lineId === 'WALK') {
       rows.push(`
@@ -1519,27 +1542,49 @@ function renderDetail() {
     </div>`;
 }
 
-function stationRow(name, cls, time, sub, isVia) {
+function stationRow(name, cls, time, sub, opts) {
+  opts = opts || {};
+  const tags = [];
+  if (opts.via) tags.push('<small>経由</small>');
+  if (opts.transfer != null) tags.push(`<small class="tl-transfer">のりかえ${opts.transfer}分</small>`);
   return `
     <div class="tl-station ${cls || ''}">
       <div class="tl-time">${time}<small>${esc(sub)}</small></div>
       <div class="tl-node"></div>
-      <div class="tl-name">${esc(name)}${isVia ? '<small>経由</small>' : ''}</div>
+      <div class="tl-name">${esc(name)}${tags.join('')}</div>
     </div>`;
 }
 
 /* ================= 地図(Leaflet) ================= */
 let map = null, routeGroup = null;
 
-function ensureMap() {
-  if (map) return;
-  map = L.map('map', { zoomControl: false }).setView([34.70, 135.50], 11);
-  // 地図タイルは国土地理院(地理院タイル・淡色)を使用(無料・公式・日本特化)。
-  // OSM公開タイルサーバの直叩きは利用規約上ヘビーユース不可のため避ける。
-  L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', {
+// 地図タイルは国土地理院(地理院タイル)を使用(無料・公式・日本特化)。
+// OSM公開タイルサーバの直叩きは利用規約上ヘビーユース不可のため避ける。
+const GSI_STYLES = {
+  pale:  { url: 'https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png' },
+  std:   { url: 'https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png' },
+  photo: { url: 'https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg' },
+  dark:  { url: 'https://cyberjapandata.gsi.go.jp/xyz/pale/{z}/{x}/{y}.png', invert: true }
+};
+let baseTile = null;
+function setMapStyle(style) {
+  if (!map) return;
+  const conf = GSI_STYLES[style] || GSI_STYLES.pale;
+  if (baseTile) map.removeLayer(baseTile);
+  baseTile = L.tileLayer(conf.url, {
     attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html">地理院タイル(国土地理院)</a>',
     maxZoom: 18
   }).addTo(map);
+  baseTile.bringToBack();
+  document.querySelector('#map').classList.toggle('map-dark', !!conf.invert);
+  store.mapStyle = style;
+  const sel = $('#map-style'); if (sel) sel.value = style;
+}
+
+function ensureMap() {
+  if (map) return;
+  map = L.map('map', { zoomControl: false }).setView([34.70, 135.50], 11);
+  setMapStyle(store.mapStyle);
   for (const line of LINES) {
     const pts = line.stations.map(n => [STATIONS[n].lat, STATIONS[n].lng]);
     if (line.loop) pts.push(pts[0]);
@@ -2285,9 +2330,22 @@ function init() {
     toast('ドライブログをすべて削除しました');
   });
   $('#menu-reset').addEventListener('click', () => {
-    ['nn_delays', 'nn_pass', 'nn_history', 'nn_alarm', 'nn_drivelogs'].forEach(k => localStorage.removeItem(k));
+    ['nn_delays', 'nn_pass', 'nn_history', 'nn_alarm', 'nn_drivelogs', 'nn_theme', 'nn_mapstyle', 'nn_lastinputs'].forEach(k => localStorage.removeItem(k));
     location.reload();
   });
+
+  // テーマ
+  applyTheme(store.theme);
+  $$('#theme-seg button').forEach(x => x.classList.toggle('on', x.dataset.v === store.theme));
+  $('#theme-seg').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    store.theme = b.dataset.v;
+    applyTheme(b.dataset.v);
+    $$('#theme-seg button').forEach(x => x.classList.toggle('on', x === b));
+  });
+  // 地図スタイル
+  $('#map-style').value = store.mapStyle;
+  $('#map-style').addEventListener('change', e => { ensureMap(); setMapStyle(e.target.value); });
 
   renderDelays();
   renderPassUI();
@@ -2309,9 +2367,24 @@ function init() {
   renderDrivePanel();
   renderDriveLogs();
 
-  // デモ用の初期値
-  $('#input-origin').value = '梅田';
-  $('#input-dest').value = '三宮';
+  // 前回の検索入力を復元(無ければデモ用の初期値)
+  const li = (() => { try { return JSON.parse(localStorage.getItem('nn_lastinputs') || 'null'); } catch { return null; } })();
+  if (li && li.origin) {
+    $('#input-origin').value = li.origin;
+    $('#input-dest').value = li.dest || '';
+    (li.vias || []).forEach(v => addViaRow(v));
+    if (li.mode) { state.mode = li.mode; $$('.mode-btn').forEach(x => x.classList.toggle('on', x.dataset.mode === li.mode)); }
+  } else {
+    $('#input-origin').value = '梅田';
+    $('#input-dest').value = '三宮';
+  }
+
+  // オフライン検知
+  const offBar = $('#offline-bar');
+  const updateOnline = () => offBar.classList.toggle('hidden', navigator.onLine);
+  window.addEventListener('online', updateOnline);
+  window.addEventListener('offline', updateOnline);
+  updateOnline();
 
   // PWA
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {

@@ -18,6 +18,29 @@
   --font-num: 'Sora', 'Zen Kaku Gothic New', sans-serif;
 }
 
+/* ダークモード(CSS変数の上書きで全体に反映) */
+body.dark {
+  --ink: #e7efe9;
+  --ink-soft: #9aaca2;
+  --paper: #0e1714;
+  --card: #18221d;
+  --green: #18a866;
+  --green-deep: #0c8a50;
+  --green-bright: #25c074;
+  --line: #2a3631;
+}
+body.dark #app { box-shadow: 0 0 60px rgba(0,0,0,.7); }
+body.dark .datetime-row input,
+body.dark .form-grid select, body.dark .form-grid input,
+body.dark .drive-veh select, body.dark .point-input,
+body.dark .pass-select-btn, body.dark .mode-btn, body.dark .tool-btn { background: #111a16; color: var(--ink); }
+body.dark .seg button { background: #111a16; }
+body.dark #tabbar { background: #141d18; }
+body.dark .banner.info { background: #142536; color: #aacdef; border-color: #21456a; }
+body.dark #suggest-box, body.dark .modal-sheet, body.dark #parking-panel { background: #18221d; color: var(--ink); }
+body.dark .suggest-item { border-color: #222d27; }
+body.dark .leaflet-popup-content-wrapper, body.dark .leaflet-popup-tip { background: #18221d; color: var(--ink); }
+
 * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 
 html { height: 100%; }
@@ -439,6 +462,7 @@ body {
 .tl-station.via .tl-node { border-color: var(--amber); }
 .tl-name { font-size: 16.5px; font-weight: 800; }
 .tl-name small { font-size: 11px; color: var(--ink-soft); font-weight: 700; margin-left: 6px; }
+.tl-name small.tl-transfer { background: var(--amber); color: #fff; padding: 1px 7px; border-radius: 999px; font-size: 10.5px; }
 .tl-leg { display: flex; gap: 10px; }
 .tl-leg-rail {
   margin-left: 57px; width: 6px; border-radius: 3px; flex: none;
@@ -507,6 +531,10 @@ body {
 .map-ctrl.loading svg { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .map-ctrl.on { background: var(--green); color: #fff; }
+select.map-ctrl { font-family: var(--font-body); font-weight: 800; font-size: 13px; color: var(--green-deep); border: 0; height: 40px; padding: 0 10px; -webkit-appearance: none; appearance: none; text-align: center; }
+#map.map-dark .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.95) contrast(.92); }
+.theme-seg { flex: none; }
+.theme-seg button { padding: 6px 12px; font-size: 12px; }
 .map-ctrl-sep { height: 8px; }
 .map-ctrl-sep::before { content: ''; display: block; width: 28px; height: 2px; margin: 3px auto; background: rgba(255,255,255,.7); border-radius: 1px; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
 #rail-legend {
@@ -768,6 +796,16 @@ body {
 }
 
 .alarm-set-btn { width: 100%; margin-top: 8px; }
+
+/* オフライン表示バー */
+#offline-bar {
+  position: fixed; top: 0; left: 50%; transform: translateX(-50%);
+  z-index: 3000; width: 100%; max-width: 520px;
+  background: #5c4a12; color: #ffe9b0;
+  font-size: 11.5px; font-weight: 700; text-align: center;
+  padding: calc(4px + env(safe-area-inset-top)) 12px 5px;
+  line-height: 1.4;
+}
 
 /* ドライブログ */
 .drive-card { padding: 16px 14px; }

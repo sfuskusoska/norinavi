@@ -169,6 +169,12 @@
         <button id="btn-locate" class="map-ctrl" aria-label="現在地">
           <svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="3.4" fill="currentColor"/><path d="M12 2.5v3.5m0 12v3.5M2.5 12H6m12 0h3.5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/></svg>
         </button>
+        <select id="map-style" class="map-ctrl wide" aria-label="地図スタイル">
+          <option value="pale">淡色地図</option>
+          <option value="std">標準地図</option>
+          <option value="photo">航空写真</option>
+          <option value="dark">ダーク</option>
+        </select>
         <button id="btn-jr-live" class="map-ctrl wide">
           <svg viewBox="0 0 24 24" width="18" height="18"><path d="M12 2c-4 0-7 .6-7 4v9c0 1.7 1.3 3 3 3l-1.5 2v1h2l1.5-2h4l1.5 2h2v-1L16 18c1.7 0 3-1.3 3-3V6c0-3.4-3-4-7-4zM7.5 15.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm9 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zM17 10H7V6h10v4z" fill="currentColor"/></svg>
           JR走行位置
@@ -256,6 +262,13 @@
       </div>
       <div class="card menu-card">
         <h2 class="card-title">設定</h2>
+        <div class="menu-item" style="cursor:default">
+          <span>テーマ</span>
+          <div class="seg theme-seg" id="theme-seg">
+            <button data-v="light" class="on">ライト</button>
+            <button data-v="dark">ダーク</button>
+          </div>
+        </div>
         <button class="menu-item" id="menu-clear-delays"><span>遅延情報をすべて削除</span></button>
         <button class="menu-item" id="menu-clear-drive"><span>ドライブログをすべて削除</span></button>
         <button class="menu-item" id="menu-reset"><span>データを初期化</span></button>
@@ -332,6 +345,9 @@
       <div id="near-body"></div>
     </div>
   </div>
+
+  <!-- オフライン表示 -->
+  <div id="offline-bar" class="hidden">📡 オフライン:キャッシュ済みの情報で動作中(最新の遅延・地図は取得できません)</div>
 
   <!-- 降車駅アラームバー -->
   <div id="alarm-bar" class="hidden"></div>
