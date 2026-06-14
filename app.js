@@ -1175,6 +1175,8 @@ function fmtDateLabel(dateStr) {
 
 function renderResults() {
   const { points, mode, baseMin, timeType, dateStr } = state.lastSearch;
+  // 発車標は電車専用なので、リスト/発車標の切替は電車のときだけ表示
+  $('#view-seg').classList.toggle('hidden', mode !== 'train');
   $('#results-summary').textContent =
     `${points.join(' → ')} ・ ${fmtDateLabel(dateStr)} ${fmtTime(baseMin)}${timeType === 'dep' ? '出発' : '到着'}`;
 
