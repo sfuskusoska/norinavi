@@ -1,8 +1,8 @@
 // のりかえNavi Service Worker
-const CACHE = 'norinavi-v3';
+const CACHE = 'norinavi-v7';
 const TILE_CACHE = 'norinavi-tiles-v1';
 const TILE_LIMIT = 600; // 地図タイルのキャッシュ上限(古いものから削除)
-const ASSETS = ['./', './index.html', './styles.css', './app.js', './data.js', './manifest.json',
+const ASSETS = ['./', './index.html', './styles.css', './app.js', './data.js', './realtime.js', './busdata.js', './manifest.json',
   './icon.svg', './icon-192.png', './icon-512.png', './icon-180.png', './icon-512-maskable.png'];
 
 self.addEventListener('install', e => {

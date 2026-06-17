@@ -146,6 +146,7 @@ const STATIONS = {
   '大国町':         { lat: 34.6555, lng: 135.4960 },
   '住之江公園':     { lat: 34.6090, lng: 135.4810 },
   '天神橋筋六丁目': { lat: 34.7080, lng: 135.5120 },
+  '柴島':           { lat: 34.7270, lng: 135.5210 },
   '恵美須町':       { lat: 34.6520, lng: 135.5070 },
   '天下茶屋':       { lat: 34.6440, lng: 135.4960 },
   '大阪城北詰':     { lat: 34.6913, lng: 135.5345 },
@@ -305,6 +306,12 @@ const LINES = [
     id: 'o_sakaisuji', name: 'Osaka Metro堺筋線', short: '堺筋線', color: '#8b572a',
     operator: 'OSAKAMETRO', loop: false, speed: 30,
     stations: ['天神橋筋六丁目','南森町','北浜','堺筋本町','日本橋','恵美須町','天下茶屋']
+  },
+  {
+    // 堺筋線と天神橋筋六丁目で相互直通(天下茶屋〜淡路〜北千里/京都線方面)
+    id: 'o_hk_senri', name: '阪急千里線', short: '阪急千里線', color: '#7e2531',
+    operator: 'HANKYU', loop: false, speed: 40,
+    stations: ['天神橋筋六丁目','柴島','淡路']
   },
   {
     id: 'o_tozai', name: 'JR東西線', short: 'JR東西線', color: '#d3517d',

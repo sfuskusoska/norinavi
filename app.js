@@ -142,7 +142,9 @@ const WALK_PAIRS = (() => {
       if (adjacent.has(a < b ? a + '|' + b : b + '|' + a)) continue;
       const d = haversine(STATIONS[a], STATIONS[b]);
       if (d <= 0.6) {
-        pairs.push({ a, b, km: +(d * 1.25).toFixed(2), min: Math.max(2, Math.round(d * 1.25 / 4.8 * 60) + 2) });
+        // 別駅間の乗換徒歩は、直線距離だけでなく階段・改札・地下通路の移動が加わるため
+        // 経路係数1.35・実効速度4.5km/h・乗換オーバーヘッド4分で見積もる(短すぎ防止)
+        pairs.push({ a, b, km: +(d * 1.25).toFixed(2), min: Math.max(3, Math.round(d * 1.35 / 4.5 * 60) + 4) });
       }
     }
   }
@@ -230,7 +232,8 @@ function dijkstra(adj, from, to, cfg) {
     for (const e of (adj[st] || [])) {
       // 徒歩連絡は乗換ペナルティなし(所要時間に連絡時間込み)
       const transfer = ln !== '*' && e.line !== ln && e.line !== 'WALK' && ln !== 'WALK';
-      const w = e.min + (transfer ? cfg.tp : 0) + (cfg.kmW ? cfg.kmW(e.line) * e.km : 0);
+      const w = e.min + (transfer ? cfg.tp : 0) + (cfg.kmW ? cfg.kmW(e.line) * e.km : 0)
+        + (cfg.walkPen && e.line === 'WALK' ? cfg.walkPen : 0);
       const nk = e.to + '|' + e.line;
       const nd = d + w;
       if (nd < (dist.get(nk) ?? Infinity)) {
@@ -519,6 +522,47 @@ const LAST_BOARD = 30;    // 翌0:30(時刻帯の0〜30分)まで乗車可
 function todOf(min) { return ((min % 1440) + 1440) % 1440; }
 function inDeadZone(min) { const t = todOf(min); return t > LAST_BOARD && t < FIRST_DEP; }
 
+/* ===== 実時刻表(REAL_TIMETABLES)による発車標の補正 ===== */
+// 平日/休日の判定(日本の祝日は考慮しない簡易判定)
+function realDayType(dateStr) {
+  const d = dateStr ? new Date(dateStr + 'T00:00:00') : new Date();
+  const w = d.getDay();
+  return (w === 0 || w === 6) ? 'holiday' : 'weekday';
+}
+// legの進行方向(路線の駅配列上で添字が増える方向か減る方向か)
+function realDirection(leg) {
+  const line = lineById(leg.lineId);
+  const i0 = line.stations.indexOf(leg.stations[0]);
+  const i1 = line.stations.indexOf(leg.stations[1]);
+  return i1 > i0 ? 'down' : 'up';
+}
+// 指定駅・路線・方向・日種の実時刻表(発車時刻昇順)を取得
+function realTimetableFor(station, lineId, leg, dateStr) {
+  const t = REAL_TIMETABLES[station] && REAL_TIMETABLES[station][lineId];
+  if (!t) return null;
+  const byDir = t[realDirection(leg)];
+  return (byDir && byDir[realDayType(dateStr)]) || null;
+}
+// ルートrの発車時刻を実時刻表上の直近の発車に合わせて補正する(見つからなければ何もしない)
+// cursor: 同じ時刻表配列を複数ルートで共有する際に、同じ発車を重複して割り当てないための Map(list -> 次に検索を始める分)
+function applyRealTimetable(r, station, dateStr, cursor) {
+  const fr = r.legs.find(l => l.lineId !== 'WALK');
+  if (!fr || fr.stations[0] !== station) return null;
+  const list = realTimetableFor(station, fr.lineId, fr, dateStr);
+  if (!list || !list.length) return null;
+  let from = todOf(r.dep);
+  if (from < FIRST_DEP) from += 1440; // 0:00〜0:30の検索は終電後扱いで比較
+  let searchFrom = from;
+  if (cursor && cursor.has(list)) searchFrom = Math.max(searchFrom, cursor.get(list));
+  const cand = list.find(e => e.min >= searchFrom);
+  if (!cand) return null;
+  if (cursor) cursor.set(list, cand.min + 1);
+  const delta = cand.min - from;
+  for (const leg of r.legs) { leg.depTime += delta; leg.arrTime += delta; }
+  r.dep += delta; r.arr += delta;
+  return { type: cand.type, dest: cand.dest };
+}
+
 function scheduleRoute(r, baseMin, timeType) {
   const dur = computeTimes(r, 0);
   let dep = timeType === 'arr' ? baseMin - dur : baseMin;
@@ -603,6 +647,7 @@ function searchTrainRoutes(points, baseMin, timeType, passId) {
   const cfgs = [
     { tp: 5 },
     { tp: 25 },
+    { tp: 5, walkPen: 15 },  // 徒歩連絡を避け、同一駅乗換(尼崎などのJR乗換)ルートを発掘
     { tp: 5, kmW: id => (lineById(id).operator === 'JR' ? 1.0 : 0.8) * 0.35 },
     { tp: 5, kmW: id => lineById(id).operator === 'JR' ? 0 : 1.5 },  // JR優先
     { tp: 5, kmW: id => lineById(id).operator === 'JR' ? 1.5 : 0 }   // 私鉄優先
@@ -623,11 +668,37 @@ function searchTrainRoutes(points, baseMin, timeType, passId) {
     }
   }
 
+  // 3) 事業者の多様性確保: 既出の事業者だけだと埋もれる他社(阪神など)の最良ルートを発掘。
+  //    既出事業者の路線を全て除外して再探索し、別事業者の代替を1本ずつ加える。
+  for (let pass = 0; pass < 2 && routes.length < MAX_ROUTES; pass++) {
+    const repOps = new Set(routes.flatMap(r =>
+      r.legs.filter(l => l.lineId !== 'WALK').map(l => lineById(l.lineId).operator)));
+    const ban = LINES.filter(l => repOps.has(l.operator)).map(l => l.id);
+    const before = routes.length;
+    tryRoute({ tp: 8 }, ban);
+    if (routes.length === before) break; // 新たな事業者の経路が無ければ終了
+  }
+
   for (const r of routes) scheduleRoute(r, baseMin, timeType);
   const valid = routes.filter(r => r.valid); // 終電後に乗り継ぐ経路は除外
+  // 「乗換の手間」を加味した総合順。別事業者の直結乗換(改札移動)や別駅間の徒歩連絡は
+  // 実際の手間が大きいため、到着時刻にペナルティ分を上乗せしたスコアで並べる(到着時刻自体は変えない)。
+  // これによりJR直通・乗換が楽なルートが上位に来る。最速ルートは「早」バッジで分かる。
+  const WALK_PENALTY = 10, OPCHANGE_PENALTY = 6;
+  const comfortScore = r => {
+    const rides = r.legs.filter(l => l.lineId !== 'WALK');
+    let opChanges = 0;
+    for (let i = 1; i < r.legs.length; i++) {
+      const cur = r.legs[i], prev = r.legs[i - 1];
+      if (cur.lineId !== 'WALK' && prev.lineId !== 'WALK'
+        && lineById(cur.lineId).operator !== lineById(prev.lineId).operator) opChanges++;
+    }
+    const walks = r.legs.filter(l => l.lineId === 'WALK').length;
+    return r.arr + walks * WALK_PENALTY + opChanges * OPCHANGE_PENALTY;
+  };
   valid.sort((a, b) =>
     (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) ||
-    a.arr - b.arr || a.transfers - b.transfers);
+    comfortScore(a) - comfortScore(b) || a.arr - b.arr || a.transfers - b.transfers);
   assignBadges(valid);
 
   // 結果が少ない時は各経路の次発・次々発を加えてリストを充実させる(到着指定時は除く)
@@ -647,9 +718,10 @@ function searchTrainRoutes(points, baseMin, timeType, passId) {
       }
     }
   }
+  // 乗換の手間を加味した総合順で表示(同程度なら出発が早い順)。JR直通・乗換が楽なルートを上位に。
   expanded.sort((a, b) =>
     (b.passPriority ? 1 : 0) - (a.passPriority ? 1 : 0) ||
-    a.dep - b.dep || a.arr - b.arr);
+    comfortScore(a) - comfortScore(b) || a.dep - b.dep || a.arr - b.arr);
   return expanded;
 }
 
@@ -728,7 +800,7 @@ function updateHeader() {
   action.classList.add('hidden');
   if (tab === 'nav') {
     const sc = currentScreen();
-    if (sc === 'search') text.textContent = 'のりかえNavi';
+    if (sc === 'search') text.textContent = '福ちゃんNavi';
     else if (sc === 'results') {
       text.textContent = '検索結果';
       back.classList.remove('hidden');
@@ -853,25 +925,44 @@ function locate() {
 const alarm = { target: null, watchId: null, triggered: false, dist: null };
 const ALARM_KM = 1.3; // この距離まで近づいたら通知
 
-function beep() {
+// モバイル(特にiOS)では、ユーザー操作中に生成・解錠したAudioContextでないと音が鳴らない。
+// アラーム設定ボタンのタップ時にensureAudio()を呼んで解錠し、後で位置情報コールバックから鳴らせるようにする。
+let audioCtx = null;
+function ensureAudio() {
   try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    [0, 0.25, 0.5].forEach(t => {
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.type = 'sine'; o.frequency.value = 880;
-      g.gain.setValueAtTime(0.001, ctx.currentTime + t);
-      g.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + t + 0.03);
-      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.22);
-      o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.24);
-    });
-  } catch { /* 無音でも続行 */ }
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // iOS解錠: 1サンプルの無音バッファを再生してコンテキストを起動する定番手法
+      const src = audioCtx.createBufferSource();
+      src.buffer = audioCtx.createBuffer(1, 1, 22050);
+      src.connect(audioCtx.destination); src.start(0);
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+  } catch { audioCtx = null; }
+  return audioCtx;
+}
+
+function beep(times = 4) {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  for (let i = 0; i < times; i++) {
+    const t = i * 0.25;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.type = 'sine'; o.frequency.value = 880;
+    g.gain.setValueAtTime(0.001, ctx.currentTime + t);
+    g.gain.exponentialRampToValueAtTime(0.5, ctx.currentTime + t + 0.03);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + t + 0.22);
+    o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.24);
+  }
 }
 
 function armAlarm(name) {
   if (!STATIONS[name] || isVirtual(name)) { toast('この駅にはアラームを設定できません'); return; }
   if (!navigator.geolocation) { toast('位置情報が使えない端末です'); return; }
   if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
+  ensureAudio(); // タップ操作中に音声を解錠(到着時にコールバックから鳴らせるように)
+  if (navigator.vibrate) navigator.vibrate(40); // 設定できたことをハプティックで即時フィードバック(iOSは非対応のため無反応)
   alarm.target = { name, lat: STATIONS[name].lat, lng: STATIONS[name].lng };
   alarm.triggered = false; alarm.dist = null;
   store.alarm = name;
@@ -1361,7 +1452,7 @@ function renderResults() {
     if (r.delayTotal) tags.push(`<span class="tag delay">遅延 +${r.delayTotal}分</span>`);
     const chips = r.legs.filter(l => l.lineId !== 'WALK').map(l => {
       const line = lineById(l.lineId);
-      return `<span class="route-line-chip"><i style="background:${line.color}"></i>${esc(line.short)}</span>`;
+      return `<span class="route-line-chip" style="background:${line.color}22;color:${line.color}"><i style="background:${line.color}"></i>${esc(line.short)}</span>`;
     }).join('<span style="color:#b9c6ba;font-weight:800">›</span>');
     const cardDep = r.legs[0].depTime;
     const firstRide = r.legs.find(l => l.lineId !== 'WALK');
@@ -1401,7 +1492,6 @@ function renderResults() {
 /* ===== 発車標(電光掲示板)ビュー ===== */
 let approachTimer = null;
 function stopApproach() { if (approachTimer) { clearInterval(approachTimer); approachTimer = null; } }
-function nowMinutesFloat() { const d = new Date(); return d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60; }
 
 // 路線略称から発車標の種別色を決める(JR系は路線色、私鉄/メトロも路線色を使用)
 function boardDest(r) {
@@ -1412,21 +1502,46 @@ function boardDest(r) {
 function renderResultsBoard(list) {
   list.className = 'is-board';
   const origin = state.lastSearch.points[0];
-  const rows = state.routes.map((r, idx) => {
+  // 実時刻表(REAL_TIMETABLES)があれば発車時刻・行先・種別を実際のダイヤに補正
+  // cursorで同じ時刻表上の同一発車が複数ルートに重複して割り当たらないようにする
+  const cursor = new Map();
+  const realInfo = state.routes.map(r => applyRealTimetable(r, origin, state.lastSearch.dateStr, cursor));
+  const realCount = realInfo.filter(Boolean).length;
+
+  // 補正後の発車時刻順に並べ替えて発車順(次発/次々発/…)を割り直す
+  const order = state.routes
+    .map((_, idx) => idx)
+    .sort((a, b) => state.routes[a].legs[0].depTime - state.routes[b].legs[0].depTime);
+
+  const rowData = order.map(idx => {
+    const r = state.routes[idx];
     const firstRide = r.legs.find(l => l.lineId !== 'WALK');
     const line = firstRide ? lineById(firstRide.lineId) : null;
     const plat = firstRide ? (hashStr(firstRide.lineId + firstRide.stations[0]) % 11) + 1 : '-';
-    const order = idx === 0 ? '次発' : idx === 1 ? '次々発' : `${idx + 1}本目`;
+    const real = realInfo[idx];
+    const typeLabel = real ? real.type : (line ? line.short : '徒歩');
+    const destLabel = (real ? real.dest : boardDest(r)).replace(/行$/, '');
+    return { idx, r, line, plat, typeLabel, destLabel };
+  });
+
+  const rows = rowData.map(({ idx, r, line, plat, typeLabel, destLabel }, i) => {
+    const order = i === 0 ? '次発' : i === 1 ? '次々発' : `${i + 1}本目`;
     const delayTag = r.delayTotal ? `<span class="bd-delay">遅延+${r.delayTotal}</span>` : '';
     return `
     <div class="bd-row" data-idx="${idx}">
       <span class="bd-order">${order}</span>
       <span class="bd-plat">${plat}</span>
       <span class="bd-time">${fmtTime(r.legs[0].depTime)}</span>
-      <span class="bd-type" style="background:${line ? line.color : '#555'}">${esc(line ? line.short : '徒歩')}</span>
-      <span class="bd-dest">${esc(boardDest(r))}${delayTag}</span>
+      <span class="bd-type" style="background:${line ? line.color : '#555'}">${esc(typeLabel)}</span>
+      <span class="bd-dest">${esc(destLabel)}行${delayTag}</span>
     </div>`;
   }).join('');
+
+  const note = realCount === 0
+    ? '※時刻は計算値の目安です。正確な発車時刻は各駅の公式時刻表をご確認ください。'
+    : realCount === state.routes.length
+      ? '※発車時刻・行先・種別は公式時刻表に基づく実際のダイヤです。'
+      : '※公式時刻表に対応した路線は実際の発車時刻です。その他の路線の時刻は計算値の目安です。';
 
   list.innerHTML = `
     <div class="depboard">
@@ -1439,7 +1554,7 @@ function renderResultsBoard(list) {
         <span class="c-order">発車順</span><span class="c-plat">のりば</span><span class="c-time">発車時刻</span><span class="c-type">種別</span><span class="c-dest">行先</span>
       </div>
       <div class="depboard-rows">${rows}</div>
-      <div class="depboard-note">※時刻は計算値の目安です。正確な発車時刻は各駅の公式時刻表をご確認ください。</div>
+      <div class="depboard-note">${note}</div>
     </div>`;
 
   $$('#results-list .bd-row').forEach(row => row.addEventListener('click', () => {
@@ -1448,23 +1563,23 @@ function renderResultsBoard(list) {
     showScreen('detail');
   }));
 
-  startApproach();
+  startApproach(rowData[0]);
 }
 
-function startApproach() {
+function startApproach(soon) {
   stopApproach();
+  // 検索基準時刻(state.lastSearch.baseMin)を起点に、実時間の経過分だけ進める「シミュレート時刻」
+  const baseMin = state.lastSearch.baseMin;
+  const startRealMs = Date.now();
   const tick = () => {
     const el = $('#dep-approach');
     const clk = $('#bd-clock');
     if (!el) { stopApproach(); return; }
-    const now = nowMinutesFloat();
-    if (clk) { const d = new Date(); clk.textContent = fmtTime(d.getHours() * 60 + d.getMinutes()); }
-    const soon = state.routes[0];
-    const dep = soon.legs[0].depTime;
-    let mins = dep - now;
-    // 翌日にまたぐ場合の補正(終電後始発など)
-    if (mins < -60) mins += 1440;
-    const line = lineById((soon.legs.find(l => l.lineId !== 'WALK') || {}).lineId) || { color: '#7FBE26' };
+    const now = baseMin + (Date.now() - startRealMs) / 60000;
+    if (clk) clk.textContent = fmtTime(now);
+    const dep = soon.r.legs[0].depTime;
+    const mins = dep - now;
+    const line = soon.line || { color: '#7FBE26' };
     const clamped = Math.max(0, Math.min(12, mins));
     const leftPct = 6 + (1 - clamped / 12) * 82; // 12分前=左端 → 0分=駅(右)
     let label, near = false;
@@ -1486,7 +1601,7 @@ function startApproach() {
           </svg>
         </span>
       </div>
-      <div class="appr-label ${near ? 'near' : ''}">${esc(boardDest(soon))}方面 ・ ${label}</div>`;
+      <div class="appr-label ${near ? 'near' : ''}">${esc(soon.typeLabel)} ${esc(soon.destLabel)}行 ・ ${label}</div>`;
   };
   tick();
   approachTimer = setInterval(tick, 3000);
@@ -1539,10 +1654,47 @@ function renderPathCard(list) {
   }
 }
 
-/* バス: 路線・時刻の無料データが無いためアプリ内計算は不可。Google乗換へ連携＋近隣バス停 */
+/* 三宮発バス時刻表(発車標)。BUS_TIMETABLESに登録された主要路線の次発を表示 */
+function renderBusBoard(origin) {
+  const services = (typeof BUS_TIMETABLES !== 'undefined') && BUS_TIMETABLES[origin];
+  if (!services || !services.length) return '';
+  const dayType = realDayType(state.lastSearch.dateStr);
+  const ref = todOf(state.lastSearch.baseMin);
+  const rows = services.map(svc => {
+    const list = svc.times[dayType] || svc.times.weekday;
+    const up = list.filter(t => t >= ref);
+    const label = svc.name + (svc.dir ? `〔${svc.dir}〕` : '');
+    let timesHtml;
+    if (up.length) {
+      const wait = Math.max(0, Math.ceil(up[0] - ref));
+      const more = up.slice(1, 3).map(t => fmtTime(t)).join(' / ');
+      timesHtml = `<div class="busb-next"><b>${fmtTime(up[0])}</b><span class="busb-soon">約${wait}分後</span></div>`
+        + (more ? `<div class="busb-more">次以降 ${more}</div>` : '');
+    } else {
+      timesHtml = `<div class="busb-end">本日の運行は終了(始発 ${fmtTime(list[0])})</div>`;
+    }
+    return `
+      <div class="busb-row">
+        <div class="busb-head">
+          <span class="busb-chip" style="background:${svc.color}">${esc(label)}</span>
+          <span class="busb-dest">${esc(svc.dest)}</span>
+        </div>
+        <div class="busb-stop">のりば: ${esc(svc.stop)} ・ ${esc(svc.operator)}</div>
+        ${timesHtml}
+      </div>`;
+  }).join('');
+  return `
+    <div class="route-card busboard" style="cursor:default">
+      <div class="busb-title">🚌 ${esc(origin)}発 バス時刻表 <span class="busb-day">${dayType === 'holiday' ? '土日祝' : '平日'}ダイヤ</span></div>
+      ${rows}
+      <p class="demo-note" style="margin-top:8px">※神姫バス・阪急/阪神バス公式時刻表に基づく実際の発車時刻です(三宮発の主要路線のみ)。経路全体はGoogleマップでご確認ください。</p>
+    </div>`;
+}
+
+/* バス: 経路検索データは無いためGoogle連携＋近隣バス停。三宮発は上に実時刻表を表示 */
 function renderBusCard(list) {
   const pts = state.lastSearch.points;
-  list.innerHTML = `
+  list.innerHTML = renderBusBoard(pts[0]) + `
     <div class="route-card" style="cursor:default">
       <div class="route-tags"><span class="tag" style="background:#1ba5a5">バス</span></div>
       <p style="font-size:13.5px;font-weight:700;line-height:1.6;margin:4px 0 10px">

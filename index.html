@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#04532f">
-<title>のりかえNavi - 乗換案内デモ</title>
+<title>福ちゃんNavi - 乗換案内デモ</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon.svg" type="image/svg+xml">
 <link rel="icon" href="icon-192.png" sizes="192x192" type="image/png">
@@ -27,7 +27,7 @@
       <span class="logo-mark">
         <svg viewBox="0 0 24 24" width="20" height="20"><path d="M12 2c-4 0-7 .6-7 4v9c0 1.7 1.3 3 3 3l-1.5 2v1h2l1.5-2h4l1.5 2h2v-1L16 18c1.7 0 3-1.3 3-3V6c0-3.4-3-4-7-4zM7.5 15.5a1.5 1.5 0 110-3 1.5 1.5 0 010 3zm9 0a1.5 1.5 0 110-3 1.5 1.5 0 010 3zM17 10H7V6h10v4z" fill="currentColor"/></svg>
       </span>
-      <span id="header-text">のりかえNavi</span>
+      <span id="header-text">福ちゃんNavi</span>
     </div>
     <button id="header-action" class="header-btn hidden">時間変更</button>
   </header>
@@ -320,7 +320,7 @@
       <div class="card menu-card">
         <h2 class="card-title">アプリについて</h2>
         <p class="about-text">
-          のりかえNavi は NAVITIME 風の乗換案内デモPWAです。<br>
+          福ちゃんNavi は NAVITIME 風の乗換案内デモPWAです。<br>
           ブラウザのメニューから「ホーム画面に追加」すると、アプリのように起動できます。<br><br>
           <b>収録サンプル路線(東京エリア):</b><br>
           JR山手線 / JR中央線快速 / JR横浜線 / JR東海道線 / 小田急小田原線 / 東急東横線<br><br>
@@ -405,6 +405,8 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="data.js"></script>
+<script src="realtime.js"></script>
+<script src="busdata.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
