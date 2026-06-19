@@ -1,5 +1,5 @@
 // のりかえNavi Service Worker
-const CACHE = 'norinavi-v7';
+const CACHE = 'norinavi-v8';
 const TILE_CACHE = 'norinavi-tiles-v1';
 const TILE_LIMIT = 600; // 地図タイルのキャッシュ上限(古いものから削除)
 const ASSETS = ['./', './index.html', './styles.css', './app.js', './data.js', './realtime.js', './busdata.js', './manifest.json',

@@ -2768,9 +2768,20 @@ function init() {
   window.addEventListener('offline', updateOnline);
   updateOnline();
 
-  // PWA
+  // PWA(Service Worker)。新バージョン公開時に自動で最新へ更新する。
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    let refreshing = false;
+    const hadController = !!navigator.serviceWorker.controller;
+    // 新しいSWが有効化されたら最新版へリロード(初回インストール時は不要)
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (refreshing || !hadController) return;
+      refreshing = true;
+      location.reload();
+    });
+    navigator.serviceWorker.register('sw.js').then(reg => {
+      reg.update().catch(() => {});                                  // 起動時に更新確認
+      setInterval(() => reg.update().catch(() => {}), 60 * 60 * 1000); // 以降1時間ごと
+    }).catch(() => {});
   }
 }
 
