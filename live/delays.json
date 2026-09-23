@@ -1,21 +1,11 @@
 {
- "updated": 1790144674,
+ "updated": 1790164695,
  "source": "JR西日本 列車走行位置 (https://www.train-guide.westjr.co.jp/)",
  "delays": [
   {
    "lineId": "o_jrkk",
-   "min": 22,
-   "trains": 49
-  },
-  {
-   "lineId": "o_loop",
-   "min": 5,
-   "trains": 21
-  },
-  {
-   "lineId": "o_tozai",
-   "min": 2,
-   "trains": 14
+   "min": 7,
+   "trains": 54
   }
  ]
 }
